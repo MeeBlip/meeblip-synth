@@ -14,6 +14,8 @@
 ;-------------------------------------------------------------------------------------------------------------------
 ;
 ;					Changelog
+;
+;V2.02 2011.12.12 - Corrected code to save pre-filtered waveform
 ;V2.01 2011.12.01 - Added inverse sawtooth waveform
 ;				  - Fixed wavetable overflow in variable pulse calculation 
 ;				  - Increase Portamento rate
@@ -895,14 +897,14 @@ LIMITED_TRIB:									; Triangle wave lookup
 			mov		r16, r0						; Copy into DCO B
 
 CALC_DIST:
-			subi    r16, $80			; -127..127 Sign Oscillator B waveform
+			subi    r16, $80			; -128..127 Sign Oscillator B waveform
 
 			sbrc	r21, SW_DISTORTION  ; 0/1 (OSC DIST = off/on)
     		eor	    r17, r16 
 
 			; Turn off OSCB if not enabled
 			sbrs	r23, SW_OSCB_ENABLE	
-			ldi		r16, $80				; Zero OSCB. Oscillator is signed				
+			ldi		r16, $00				; Zero OSCB. Oscillator is signed				
 
 
 ;-------------------------------------------------------------------------------------------------------------------
@@ -920,7 +922,6 @@ CALC_DIST:
 			adc 	r31, r1				; sum scaled waves
   			sts 	WAVEB,r16			; store signed DCO B wave for fm 
 			movw	r16, r30			; place signed output in HDAC:LDAC
-			movw	OSC_OUT_L, r16		; keep a copy for highpass filter
 
 			; rotate right a couple of times to make a couple of bits of headroom for resonance.  
 
@@ -928,6 +929,8 @@ CALC_DIST:
 		    ror	    r16		            ;/ r17:r16 = r17:r16 asr 1
 			asr	    r17		            ;\
 		    ror	    r16		            ;/ r17:r16 = r17:r16 asr 1
+
+			movw	OSC_OUT_L, r16		; keep a copy for highpass filter
 
 ;DCF:
 
