@@ -15,6 +15,20 @@
 ;
 ;					Changelog
 ;
+;V2.04 2012.01.05 - Added maximum resonance table
+;				  - Envelopes no longer restart on note off release if they're stopped
+;				  - Replace MUL8X8S routine with hardware multiply
+;				  - Updated LPM calls throughout code
+;				  - Implement 2 byte offsets for all table lookups
+;				  - New bandlimited waveforms with matched average amplitude (Axel Werner)
+;				  - New 32x16 bit multiply, 32 bit load (AW)
+;				  - Use signed multiply in DCA (AW)
+;				  - New oscillator mix routine (AW)
+;				  - New TAB_VCF, TAB_VCA and TIMETORATE tables (AW)
+;				  - Fix envelope decay bug (AW)
+;V2.03 2011.12.20 - Added MIDI Velocity to VCF Envelope Modulation
+;				  - Changed maximum resonance and resonance scaling limits
+;				  - Updated oscillator mix levels because of mix clipping
 ;V2.02 2011.12.12 - Corrected code to save pre-filtered waveform
 ;V2.01 2011.12.01 - Added inverse sawtooth waveform
 ;				  - Fixed wavetable overflow in variable pulse calculation 
@@ -36,7 +50,7 @@
 ;				  - MIDI knob and switch CC control
 ;				  - DCA gate, LFO sync, modulation wheel and filter key track now always on
 ;				  - LFO enable switch added
-;				  - anti-alias switch added - off uses bandlimited wave 0, on uses bandlimited wavetable 0..15, based on note
+;				  - anti-alias switch added - off uses bandlimited wave 0, on uses bandlimited wavetable 0..11, based on note
 ;				  - Added variable names for switches instead of using bit ops - allows easier reorganization of panel
 ;				  - FM switch - off or 100%
 ;				  - New sample rate - 36363.63636 Hz, approximately 440 instructions per sample 
@@ -66,6 +80,7 @@
 ; 	Laurie Biddulph	- Worked with Jarek to translate his comments into English, ported to Atmega16
 ;	Daniel Kruszyna	- Extended AVRsynth (several of his ideas are incorporated in MeeBlip)
 ;  	Julian Schmidt	- Original filter algorithm
+; 	Axel Werner		- Code optimization, bug fixes and bandlimited waveforms 
 ;	James Grahame 	- Ported and extended the AVRsynth code to MeeBlip hardware.
 ;
 ;-------------------------------------------------------------------------------------------------------------------
@@ -244,7 +259,8 @@ ENV_INTEGR:	        .BYTE 1
 ENVPHASE2:	        .BYTE 1		        ; 0=stop 1=attack 2=decay 3=sustain 4=release
 ENV_FRAC_L2:	    .BYTE 1
 ENV_FRAC_H2:	    .BYTE 1
-ENV_INTEGr2:	    .BYTE 1
+ENV_INTEGR2:	    .BYTE 1
+VELOCITY_ENVMOD:	.BYTE 1
 
 LFOPHASE:	        .BYTE 1		        ; 0=up 1=down
 LFO_FRAC_L:	        .BYTE 1		        ;\
@@ -288,7 +304,8 @@ DELTAB_1: .byte 1
 DELTAB_2: .byte 1
 
 ; Wavetable select
-WAVETABLE:			.byte 1			; Bandlimited wavetable 0..16
+WAVETABLE_A:		.byte 1		; Bandlimited wavetable 0..11
+WAVETABLE_B:		.byte 1		; Bandlimited wavetable 0..11
 
 ; oscillator pulse width
 PULSE_WIDTH:		.byte 1
@@ -307,6 +324,7 @@ WRITE_PATCH_OFFSET:	.byte 1		; start of patch in eeprom
 SCALED_RESONANCE: .byte 1
 b_L:		.byte 1
 b_H:		.byte 1
+VCF_STATUS: .byte 1				; 0 indicates VCF off, 1 = on
 
 ;-------------------------------------------------------------------------------------------------------------------
 ; MIDI Control Change parameter table
@@ -475,112 +493,70 @@ DELTA_C1:
 ;-----------------------------------------------------------------------------
 ; VCF Filter Cutoff
 ;
-; Log table for calculating filter cutoff levels so they sound linear
-; to our non-linear ears. 
-
-
+; value = (16th root of 2)**(index+1)
+;
 TAB_VCF:
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0403
-     .DW 0x0404
-     .DW 0x0404
-     .DW 0x0505
-     .DW 0x0505
-     .DW 0x0606
-     .DW 0x0606
-     .DW 0x0606
-     .DW 0x0807
-     .DW 0x0808
-     .DW 0x0909
-     .DW 0x0A0A
-     .DW 0x0A0A
-     .DW 0x0C0B
-     .DW 0x0C0C
-     .DW 0x0D0C
-     .DW 0x0F0E
-     .DW 0x1110
-     .DW 0x1212
-     .DW 0x1413
-     .DW 0x1615
-     .DW 0x1817
-     .DW 0x1A19
-     .DW 0x1C1B
-     .DW 0x201E
-     .DW 0x2221
-     .DW 0x2423
-     .DW 0x2826
-     .DW 0x2C2A
-     .DW 0x302E
-     .DW 0x3432
-     .DW 0x3836
-     .DW 0x403A
-     .DW 0x4442
-     .DW 0x4C48
-     .DW 0x524F
-     .DW 0x5855
-     .DW 0x615D
-     .DW 0x6865
-     .DW 0x706C
-     .DW 0x7E76
-     .DW 0x8A85
-     .DW 0x9690
-     .DW 0xA49D
-     .DW 0xB0AB
-     .DW 0xC4BA
-     .DW 0xD8CE
-     .DW 0xE8E0
-     .DW 0xFFF4
+	.db	  1,   1,   1,   1,   1,   1,   1,   1		;   0
+	.db	  1,   1,   1,   1,   1,   1,   1,   2		;   8
+	.db	  2,   2,   2,   2,   2,   2,   2,   2		;  16
+	.db	  2,   3,   3,   3,   3,   3,   3,   3		;  24
+	.db	  4,   4,   4,   4,   4,   5,   5,   5		;  32
+	.db	  5,   6,   6,   6,   7,   7,   7,   7		;  40
+	.db	  8,   8,   9,   9,   9,  10,  10,  11		;  48
+	.db	 11,  12,  12,  13,  14,  14,  15,  16		;  56
+	.db	 16,  17,  18,  19,  19,  20,  21,  22		;  64
+	.db	 23,  24,  25,  26,  28,  29,  30,  31		;  72
+	.db	 33,  34,  36,  38,  39,  41,  43,  45		;  80
+	.db	 47,  49,  51,  53,  56,  58,  61,  63		;  88
+	.db	 66,  69,  72,  76,  79,  82,  86,  90		;  96
+	.db	 94,  98, 103, 107, 112, 117, 122, 127		; 104
+	.db	133, 139, 145, 152, 158, 165, 173, 181		; 112
+	.db	189, 197, 206, 215, 224, 234, 245, 255		; 120
 
 ;-----------------------------------------------------------------------------
 ;Time to Rate conversion table for envelope timing.
+; lfo:
+;  update values for 32us update rate
+;  LFO_INTEGR overflows all 256*32us = 8.192 ms
+;
+; formula  Tof = 256*32us*2^16/N
+;          LFOfreq = 1/Tof
+
+; Rate value =	Rmin * Q^i with Q = (Rmax/Rmin)^(1/31) = 1,286111766
 
 TIMETORATE:
-		    .DW	50957		            ; 10.54 mS
-		    .DW	39621		            ; 13.55 mS
-		    .DW	30807		            ; 17.43 mS
-		    .DW	23953		            ; 22.41 mS
-		    .DW	18625		            ; 28.83 mS
-		    .DW	14481		            ; 37.07 mS
-		    .DW	11260		            ; 47.68 mS
-		    .DW	 8755		            ; 61.32 mS
-    		.DW	 6807		            ; 78.87 mS
-		    .DW	 5293		            ; 101.4 mS
-		    .DW	 4115		            ; 130.5 mS
-		    .DW	 3200		            ; 167.8 mS
-		    .DW	 2488		            ; 215.8 mS
-		    .DW	 1935		            ; 277.5 mS
-    		.DW	 1504		            ; 356.9 mS
-		    .DW	 1170		            ; 459.0 mS
-		    .DW	  909		            ; 590.4 mS
-		    .DW	  707		            ; 759.3 mS
-		    .DW	  550		            ; 976.5 mS
-		    .DW	  427		            ; 1.256 S
-    		.DW	  332		            ; 1.615 S
-    		.DW   258		            ; 2.077 S
-		    .DW	  201		            ; 2.672 S
-		    .DW	  156		            ; 3.436 S
-		    .DW	  121		            ; 4.419 S
-		    .DW	   94		            ; 5.684 S
-		    .DW	   73		            ; 7.310 S
-		    .DW	   57		            ; 9.401 S
-		    .DW	   44		            ; 12.09 S
-		    .DW	   35		            ; 15.55 S
-		    .DW	   27		            ; 20.00 S
-			.DW	   19
+	.DW	50957		; 10.54 mS	fast lfo, attack/rise time
+	.DW	39621		; 13.55 mS
+	.DW	30807		; 17.43 mS
+	.DW	23953		; 22.41 mS
+	.DW	18625		; 28.83 mS
+	.DW	14481		; 37.07 mS
+	.DW	11260		; 47.68 mS
+	.DW	 8755		; 61.32 mS
+	.DW	 6807		; 78.87 mS
+	.DW	 5293		; 101.4 mS
+	.DW	 4115		; 130.5 mS
+	.DW	 3200		; 167.8 mS
+	.DW	 2488		; 215.8 mS
+	.DW	 1935		; 277.5 mS
+	.DW	 1504		; 356.9 mS
+	.DW	 1170		; 459.0 mS
+	.DW	  909		; 590.4 mS
+	.DW	  707		; 759.3 mS
+	.DW	  550		; 976.5 mS
+	.DW	  427		; 1.256 S
+	.DW	  332		; 1.615 S
+	.DW	  258		; 2.077 S
+	.DW	  201		; 2.672 S
+	.DW	  156		; 3.436 S
+	.DW	  121		; 4.419 S
+	.DW	   94		; 5.684 S
+	.DW	   73		; 7.310 S
+	.DW	   57		; 9.401 S
+	.DW	   44		; 12.09 S
+	.DW	   35		; 15.55 S
+	.DW	   27		; 20.00 S
+	.DW	   19		; 28.26 S	slow lfo, attack/rise time
 
 ;-----------------------------------------------------------------------------
 ;
@@ -588,137 +564,58 @@ TIMETORATE:
 ;
 ; Amplitude level lookup table. Envelopes levels are calculated as linear 
 ; and then converted to approximate an exponential saturation curve.
+;
+; polynomial y = a	+ bx + cx2 + dx3
+; with coefficients…
+;    a  0
+;    b  0.210841569
+;    c  0.000177823
+;    d  1.14E-05
 
 TAB_VCA:
-     .DW 0x0000
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0101
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0202
-     .DW 0x0302
-     .DW 0x0303
-     .DW 0x0303
-     .DW 0x0404
-     .DW 0x0404
-     .DW 0x0404
-     .DW 0x0505
-     .DW 0x0505
-     .DW 0x0606
-     .DW 0x0606
-     .DW 0x0606
-     .DW 0x0707
-     .DW 0x0707
-     .DW 0x0707
-     .DW 0x0808
-     .DW 0x0808
-     .DW 0x0808
-     .DW 0x0909
-     .DW 0x0909
-     .DW 0x0909
-     .DW 0x0A0A
-     .DW 0x0B0B
-     .DW 0x0C0C
-     .DW 0x0C0C
-     .DW 0x0D0D
-     .DW 0x0E0E
-     .DW 0x0F0F
-     .DW 0x1010
-     .DW 0x1111
-     .DW 0x1212
-     .DW 0x1313
-     .DW 0x1414
-     .DW 0x1515
-     .DW 0x1716
-     .DW 0x1818
-     .DW 0x1A19
-     .DW 0x1C1B
-     .DW 0x1D1D
-     .DW 0x1F1E
-     .DW 0x2020
-     .DW 0x2121
-     .DW 0x2222
-     .DW 0x2423
-     .DW 0x2525
-     .DW 0x2726
-     .DW 0x2828
-     .DW 0x2A29
-     .DW 0x2C2B
-     .DW 0x2D2D
-     .DW 0x2F2E
-     .DW 0x3030
-     .DW 0x3131
-     .DW 0x3232
-     .DW 0x3433
-     .DW 0x3535
-     .DW 0x3736
-     .DW 0x3838
-     .DW 0x3939
-     .DW 0x3B3A
-     .DW 0x3C3C
-     .DW 0x3E3D
-     .DW 0x403F
-     .DW 0x4342
-     .DW 0x4444
-     .DW 0x4645
-     .DW 0x4747
-     .DW 0x4948
-     .DW 0x4A4A
-     .DW 0x4C4B
-     .DW 0x4E4D
-     .DW 0x504F
-     .DW 0x5251
-     .DW 0x5453
-     .DW 0X5655
-     .DW 0x5857
-     .DW 0x5A59
-     .DW 0x5C5B
-     .DW 0x5F5E
-     .DW 0x6160
-     .DW 0x6462
-     .DW 0x6564
-     .DW 0x6766
-     .DW 0x6A68
-     .DW 0x6D6B
-     .DW 0x6F6E
-     .DW 0x7370
-     .DW 0x7573
-     .DW 0x7877
-     .DW 0x7B7A
-     .DW 0x7E7D
-     .DW 0x807F
-     .DW 0x8382
-     .DW 0x8785
-     .DW 0x8988
-     .DW 0x8E8C
-     .DW 0x9190
-     .DW 0x9493
-     .DW 0x9896
-     .DW 0x9C9A
-     .DW 0xA09E
-     .DW 0xA4A2
-     .DW 0xA8A6
-     .DW 0xAEAB
-     .DW 0xB3B1
-     .DW 0xB8B6
-     .DW 0xBBBA
-     .DW 0xBFBD
-     .DW 0xC3C1
-     .DW 0xC9C6
-     .DW 0xCECC
-     .DW 0xD3D1
-     .DW 0xD9D6
-     .DW 0xE0DD
-     .DW 0xE5E3
-     .DW 0xEBE8
-     .DW 0xF0EE
-     .DW 0xF4F2
-     .DW 0xF9F6
-     .DW 0xFFFC
+	.db	  0,   0,   0,   1,   1,   1,   1,   1		;   0
+	.db	  2,   2,   2,   2,   3,   3,   3,   3		;   8
+	.db	  3,   4,   4,   4,   4,   5,   5,   5		;  16
+	.db	  5,   6,   6,   6,   6,   7,   7,   7		;  24
+	.db	  7,   8,   8,   8,   8,   9,   9,   9		;  32
+	.db	  9,  10,  10,  10,  11,  11,  11,  11		;  40
+	.db	 12,  12,  12,  13,  13,  13,  14,  14		;  48
+	.db	 14,  15,  15,  15,  16,  16,  16,  17		;  56
+	.db	 17,  18,  18,  18,  19,  19,  20,  20		;  64
+	.db	 20,  21,  21,  22,  22,  23,  23,  23		;  72
+	.db	 24,  24,  25,  25,  26,  26,  27,  27		;  80
+	.db	 28,  28,  29,  29,  30,  30,  31,  31		;  88
+	.db	 32,  33,  33,  34,  34,  35,  35,  36		;  96
+	.db	 37,  37,  38,  39,  39,  40,  41,  41		; 104
+	.db	 42,  43,  43,  44,  45,  45,  46,  47		; 112
+	.db	 48,  48,  49,  50,  51,  51,  52,  53		; 120
 
+	.db	 54,  55,  56,  56,  57,  58,  59,  60		; 128
+	.db	 61,  62,  63,  63,  64,  65,  66,  67		; 136
+	.db	 68,  69,  70,  71,  72,  73,  74,  75		; 144
+	.db	 76,  77,  78,  80,  81,  82,  83,  84		; 152
+	.db	 85,  86,  87,  89,  90,  91,  92,  93		; 160
+	.db	 95,  96,  97,  98, 100, 101, 102, 104		; 168
+	.db	105, 106, 108, 109, 110, 112, 113, 115		; 176
+	.db	116, 118, 119, 120, 122, 123, 125, 126		; 184
+	.db	128, 130, 131, 133, 134, 136, 138, 139		; 192
+	.db	141, 142, 144, 146, 148, 149, 151, 153		; 200
+	.db	154, 156, 158, 160, 162, 164, 165, 167		; 208
+	.db	169, 171, 173, 175, 177, 179, 181, 183		; 216
+	.db	185, 187, 189, 191, 193, 195, 197, 199		; 224
+	.db	201, 203, 206, 208, 210, 212, 214, 217		; 232
+	.db	219, 221, 224, 226, 228, 231, 233, 235		; 240
+	.db	238, 240, 243, 245, 247, 250, 252, 255		; 248
+
+;-----------------------------------------------------------------------------
+;
+; Limit maximum resonance when filter cutoff is extremely low
+; 
+
+TAB_REZ:
+	.db	224, 224, 224, 224, 224, 224, 224, 224		;   0 - Low value of DE
+	.db	224, 228, 232, 236, 240, 244, 248, 252		;   8 - High value of FC
+	
 ;-------------------------------------------------------------------------------------------------------------------
 ;		I N T E R R U P T   S U B R O U T I N E S
 ;-------------------------------------------------------------------------------------------------------------------
@@ -810,41 +707,42 @@ CALC_DCOA:
 			sbrs	r23, SW_ANTI_ALIAS
 			rjmp	RAW_PULSE					; Calculate raw pulse/PWM when anti-alias switch is off
 
-			lds		r22, WAVETABLE				; Offset to the correct wavetable, based on note number (0..15)
+			lds		r22, WAVETABLE_A				; Offset to the correct wavetable, based on note number (0..15)
 
-			; get sample a into r17
+	; r17 phase
+	; r20 pulse width
+	; r22 wavetable
+	; get sample a into r17
 			ldi		ZL, low (2*INV_SAW0)		; Load low part of byte address into ZL
 			ldi		ZH, high(2*INV_SAW0)		; Load high part of byte address into ZH
 			add		ZL, r17						; Offset the wavetable by the ramp phase (i)
 			adc		ZH, r22						; Wavetable 0..15
 			lpm									; Load wave(i) into r0
 
-			; get sample b (inverse ramp) out of phase into r18
-			mov		r16, r20					; Grab a copy of the pulse width 
+	; get sample b out of phase into r18
+			mov		r16, r20					; Grab a copy of the pulse width
 			add		r16, r17					; Add phase offset for second table (pulse width + original sample)
 			mov		r17, r0						; store previous sample in r17
-			ldi		ZL, low (2*SAW_LIMIT0)		; Load low part of byte address into ZL
-			ldi		ZH, high(2*SAW_LIMIT0)		; Load high part of byte address into ZH
+			ldi		ZL, low (2*INV_SAW0)		; Load low part of byte address into ZL
+			ldi		ZH, high(2*INV_SAW0)		; Load high part of byte address into ZH
 			add		ZL, r16						; Add phase offset for second table.
 			adc		ZH, r22						; Wavetable 0..15
-			lpm									; Load wave(i) into r0 
-			
-			; xyzzy 16-bit result when calculating wave a+b to ensure that we don't overflow 
+			lpm									; Load wave(i) into r0
+
+	; subtract wave a-b		
+	; first part b > a, second part b < a
 			clr		r16
-			add		r17, r0					; wave a+b, store in r16:r17		
-			adc		r16, ZERO
-			add		r17, r20					; offset the sample amplitude by wave b offset to counter amplitude shift 
-			adc		r16, ZERO
-			; Subtract offset
-			subi	r17, $FF					; remove byte offset to bring the value back to single byte range
+			sub		r17, r0			
 			sbc		r16, ZERO
-			brcc	PULSE_BOUND_CHECK			; non-negative result, so no need to limit the value
+			add		r17, r20					; add offset (pulse width)
+			adc		r16, ZERO
+			brge	PULSE_BOUND_CHECK			; non-negative result, so no need to limit the value
 			ldi		r17, 0
 			ldi		r16, 0						; value was negative, so force to zero
 PULSE_BOUND_CHECK:
 			tst		r16							; Check if we're larger than 255
 			breq	PWM_EXIT					; no need to limit upper bound
-			ldi		r17, $FF	
+			ldi		r17, $FF
 PWM_EXIT:
 			subi	r17, $80					; sign the result
 			rjmp	CALC_DCOB
@@ -866,7 +764,7 @@ DCOA_SAW:
 		    mov	    r17, PHASEA_2	    
 			sbrs	r23, SW_ANTI_ALIAS
 			rjmp	DCOA_SAW_SIGN	
-			lds		r22, WAVETABLE				; Offset to the correct wavetable, based on note number (0..15)
+			lds		r22, WAVETABLE_A			; Offset to the correct wavetable, based on note number (0..15)
 			ldi		ZL, low (2*INV_SAW0)		; Load low part of byte address into ZL
 			ldi		ZH, high(2*INV_SAW0)		; Load high part of byte address into ZH
 			add		ZL, r17						; Offset the wavetable by the ramp phase (i)
@@ -878,7 +776,7 @@ DCOA_SAW_SIGN:
 
 ;Calculate DCO B
 CALC_DCOB:
-			lds		r22, WAVETABLE				; Offset to the correct wavetable, based on note number (0..15)
+			lds		r22, WAVETABLE_B			; Offset to the correct wavetable, based on note number (0..15)
 			sbrs	r23, SW_ANTI_ALIAS
 			ldi		r22, 0						; Use wavetable 0 when anti-alias switch off
 				
@@ -910,8 +808,8 @@ CALC_DIST:
     		eor	    r17, r16 
 
 			; Turn off OSCB if not enabled
-			sbrs	r23, SW_OSCB_ENABLE	
-			ldi		r16, $00				; Zero OSCB. Oscillator is signed				
+			;sbrs	r23, SW_OSCB_ENABLE	
+			;ldi		r16, $00				; Zero OSCB. Oscillator is signed				
 
 
 ;-------------------------------------------------------------------------------------------------------------------
@@ -919,17 +817,19 @@ CALC_DIST:
 ;
 ; Combines DCOA (in r17) and DCOB (in r16) waves to produce a 16-bit signed result in HDAC:LDAC (r17:r16)
 ; 
+			sts	WAVEB,r16		; store signed DCO B wave for fm
 
-			ldi		r22, $80	    
+; Mixer out = (A*x + B*(1-x))/4   x=0..1
+			ldi		r22, $7F			; Set maximum oscillator level to 127 for each oscillator  
 			mulsu	r17, r22			; signed DCO A wave * level
 			movw	r30, r0				; store value in temp register
-			ldi		r22, $80
+			sbrs	r23, SW_OSCB_ENABLE	; if OSC B disabled add OSC A twice
+			mov		r16, r17			; (A*x + A*(1-x))/4   x=0..1
 			mulsu	r16, r22			; signed DCO B wave * level
 			add		r30, r0
-			adc 	r31, r1				; sum scaled waves
-  			sts 	WAVEB,r16			; store signed DCO B wave for fm 
-			movw	r16, r30			; place signed output in HDAC:LDAC		
-			
+			adc		r31, r1				; sum scaled waves
+			movw	r16, r30			; place signed output in HDAC:LDAC
+
 			; rotate right a couple of times to make a couple of bits of headroom for resonance.  
 
             asr	    r17		            ;\
@@ -971,13 +871,13 @@ OVERFLOW_1: 						;when overflow is clear
         							;now calc q*(a-b)
 
         ; Scale resonance based on filter cutoff
-		lds    r22, RESONANCE
+		lds		r22, SCALED_RESONANCE
 		lds    r20, LPF_I    		;load 'F' value
         ldi    r21, 0xff
 
         sub r21, r20 ; 1-F
         lsr r21
-		ldi r18, 32
+		ldi		r18, 0x08			; changed (4 was original value in V1)
         add r21, r18
 
         sub    r22, r21     		; Q-(1-f)
@@ -1008,11 +908,18 @@ OVERFLOW_3:
         
 		lds		r18, PATCH_SWITCH1	; Check Low Pass/High Pass panel switch. 
 		sbrs 	r18, SW_FILTER_MODE				
-		rjmp	CALC_LOWPASS						
-		movw    z_L,r20				; High Pass selected, so just load r21:r20 into z_H:z_L to disable Q 
+		rjmp	CALC_LOWPASS
+								
+SKIP_REZ:
+		movw    z_L, r20			; High Pass selected, so just load r21:r20 into z_H:z_L to disable Q 
 		rjmp	DCF_ADD				; Skip lowpass calc
 
 CALC_LOWPASS:
+
+		; skip resonance calculation if VCF is turned off (value of 0)
+		lds		r18, VCF_STATUS
+		tst		r18
+		breq	SKIP_REZ
 									; mul signed:unsigned -> (a-b) * Q
 									; 16x8 into 16-bit
 									; r19:r18 = r21:r20 (ah:al)	* r22 (b)
@@ -1084,10 +991,10 @@ NO_ROUND2:
                                 	;b1000.0000 b0000.0001 -> min 
                                 	;0b0111.1111 0b1111.1111 -> max
 
-        ldi z_H, 0b11111111
-        ldi z_L, 0b01111111
-        mov    a_L, z_H
-        mov    a_H, z_L
+		ldi	z_L, 0b11111111
+		ldi	z_H, 0b01111111
+		mov	a_L, z_L
+		mov	a_H, z_H
 
 OVERFLOW_5:
 
@@ -1165,31 +1072,20 @@ OVERFLOW_7:
 ; Digitally Controlled Amplifier
 ;
 ; Multiply the output waveform by the 8-bit value in LEVEL.
+; r17:r16 - output from filter 16b signed
+; r18     - output from DCA envelope generator
 ;-------------------------------------------------------------------------------------------------------------------
 ;
-
 DCA:
-		    ldi	    r30, 0
-		    ldi	    r31, 0
-		    lds	    r18, LEVEL
-		    cpi	    r18, 255
-		    brne	T2_ACHECK		    ; multiply when LEVEL!=255
-		    mov	    r30, r16
-		    mov	    r31, r17
-		    rjmp	T2_AEXIT
-
-T2_ALOOP:
-            asr	    r17		            ;\
-		    ror	    r16		            ;/ r17:r16 = r17:r16 asr 1
-		    lsl	    r18		            ; Cy <-- r31 <-- 0
-		    brcc	T2_ACHECK
-    		add	    r30, r16
-		    adc	    r31, r17
-
-T2_ACHECK:
-            tst	    r18
-		    brne	T2_ALOOP
-
+			movw	r30, r16
+			lds		r18, LEVEL
+			cpi		r18, 255
+			breq	T2_AEXIT	        ; don't multiply when LEVEL==255, use
+			mulsu	r17, r18		; multiply samples high byte
+			movw	r30, r0
+			mul		r16, r18		; multipliy samples low byte
+			add		r30, r1
+			adc		r31, ZERO
 T2_AEXIT:
 
 ;-------------------------------------------------------------------------------------------------------------------
@@ -1806,78 +1702,53 @@ MUL8X8U:
 			ret
 
 ;-----------------------------------------------------------------------------
-;8 bit x 8 bit multiplication (signed)
-;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-;In:	    r16 = x					    -128..+127
-;	        r17 = y					    0,000..0,996
-;Out:	    r17,r16 = x * y				-127,500..+126,504
-;Used:	    SREG,r18-r20
-;-----------------------------------------------------------------------------
-MUL8X8S:
-            bst	    r16, 7			    ; T = sign: 0=plus, 1=minus
-		    sbrc	r16, 7			    ;\
-		    neg	    r16			        ;/ r16 = abs(r16)	0..128
-			mul		r16, r17
-			movw 	r16,r0			    ; r17,r16 = LFO * LFOMOD
-		    brtc	M8X8S_EXIT		    ; exit if x >= 0
-		    com	    r16			        ;\
-		    com	    r17			        ; \
-		    sec				            ;  > r17:r16 = -r17:r16
-		    adc	    r16, ZERO	        ; /
-		    adc	    r17, ZERO	        ;/
-
-M8X8S_EXIT:
-            ret
-
-;-----------------------------------------------------------------------------
 ;32 bit x 16 bit multiplication (unsigned)
 ;- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-;In:	    r19:r18:r17:r16 = x			0..2^32-1
-;	        r23:r22 = y			        0,yyyyyyyyyyyyyyyy	0..0,9999847
-;Out:	    r19:r18:r17:r16 = x * y		0..2^32-1
-;Used:	    SREG,r20-r29
+;In:	r19:r18:r17:r16 = x		0..2^32-1
+;	r23:r22 = y			0,yyyyyyyyyyyyyyyy  0..0,9999847
+;Out:	r19:r18:r17:r16 = x * y	0..2^32-1
+;Used:	SREG,r20-r29
 ;-----------------------------------------------------------------------------
 MUL32X16:
-            push	r30
-		    clr	    r20		            ;\
-		    clr	    r21		            ;/ XX = x
-		    clr	    r24		            ;\
-		    clr	    r25		            ; \
-		    clr	    r26		            ;  \
-		    clr	    r27		            ;  / ZZ = 0
-		    clr	    r28		            ; /
-		    clr	    r29		            ;/
-		    rjmp	M3216_CHECK
 
-M3216_LOOP:
-            lsr	    r23		            ;\
-		    ror	    r22		            ;/ y:Carry = y >> 1
-		    brcc	M3216_SKIP
-		    add	    r24,r16		        ;\
-		    adc	    r25,r17		        ; \
-		    adc	    r26,r18		        ;  \
-		    adc	    r27,r19		        ;  / ZZ = ZZ + XX
-		    adc	    r28,r20		        ; /
-		    adc	    r29,r21		        ;/
+; multiply with high multiplier x
+		mul		r19, r23		; ax
+		movw	r29:r28, r1:r0
+		mul		r18, r23		; bx
+		movw	r21:r20, r1:r0
+		mul		r17, r23		; cx
+		movw	r27:r26, r1:r0
+		mul		r16, r23		; dx
+		mov		r25, r0
+		add		r26, r1
+		adc		r27, r20
+		adc		r28, r21
+		adc		r29, ZERO
+; multiply with low multiplier y
+		mul		r19, r22		; ay
+		movw	r21:r20, r1:r0
+		mul		r17, r22		; cy
+		add		r25, r0
+		adc		r26, r1
+		adc		r27, r20
+		adc		r28, r21
+		adc		r29, ZERO
+		mul		r18, r22		; by
+		movw	r21:r20, r1:r0
+		mul		r16, r22		; dy
+		mov		r24, r0
+		add		r25, r1
+		adc		r26, r20
+		adc		r27, r21
+		adc		r28, ZERO
+		adc		r29, ZERO
 
-M3216_SKIP:
-            lsl	    r16		            ;\
-		    rol	    r17		            ; \
-		    rol	    r18		            ;  \
-		    rol	    r19		            ;  / YY = YY << 1
-		    rol	    r20		            ; /
-		    rol	    r21		            ;/
+		mov		r16,r26			;\
+		mov		r17,r27			; \
+		mov		r18,r28			; / x * y
+		mov		r19,r29			;/
 
-M3216_CHECK:
-            mov	    r30,r22		        ;\
-		    or	    r30,r23		        ;/ check if y == 0
-		    brne	M3216_LOOP
-		    mov	    r16,r26		        ;\
-    		mov	    r17,r27		        ; \
-		    mov	    r18,r28		        ; / x * y
-		    mov	    r19,r29		        ;/
-		    pop	    r30
-		    ret
+		ret
 
 ;-----------------------------------------------------------------------------
 ; Load 32 bit phase value from ROM
@@ -1892,17 +1763,10 @@ LOAD_32BIT:
 		    adiw	r30, DELTA_C	    ; Z = ROM address
 		    add	    r30, r30
     		adc	    r31, r31
-		    lpm
-		    mov	    r16, r0
-		    adiw	r30, 1
-		    lpm
-		    mov	    r17, r0
-		    adiw	r30, 1
-		    lpm
-		    mov	    r18, r0
-		    adiw	r30, 1
-		    lpm
-		    mov	    r19, r0
+			lpm		r16, z+
+			lpm		r17, z+
+			lpm		r18, z+
+			lpm		r19, z+
 		    ret
 
 ;-----------------------------------------------------------------------------
@@ -1983,7 +1847,7 @@ TAB_BYTE:
 		    adc	    r31, r31		    ;/ Z = 2 * &Tab
 		    add	    r30, r16
 		    adc	    r31, ZERO
-		    lpm
+		    lpm		r16, z
 		    ret
 
 ;-----------------------------------------------------------------------------
@@ -1999,11 +1863,8 @@ TAB_WORD:
 		    adc	    r31, ZERO
 		    add	    r30, r30		    ;\
 		    adc	    r31, r31		    ;/ Z = 2 * &Tab
-		    lpm
-		    mov	    r18, r0			    ; LSByte
-		    adiw	r30, 1			    ; Z++
-		    lpm
-		    mov	    r19, r0			    ; MSByte
+		    lpm		r18, z+				; LSByte
+			lpm		r19, z				; MSByte
 		    ret
 
 ;-----------------------------------------------------------------------------
@@ -2017,8 +1878,8 @@ ADCTORATE:
             lsr	    r16
 		    lsr	    r16
 		    lsr	    r16			        ;0..31
-		    ldi	    r30, TIMETORATE
-		    ldi	    r31, 0
+			ldi		r30, low( TIMETORATE)
+			ldi		r31, high(TIMETORATE)
 		    rcall	TAB_WORD		    ;r19:r18 = rate
 		    clr	    r16
 		    clr	    r17
@@ -2205,18 +2066,20 @@ PATCH_LOOP:
 ; Used: r16-r20, r28, r29, SREG
 ;-----------------------------------------------------------------------------
 POT_SCAN:
-		    ldi	    r28, KNOB0_STATUS	;
-		    add	    r28, r20		    ; 
-		    ldi	    r29, 0			    ;
+			ldi		r28, low(KNOB0_STATUS)
+			ldi		r29, high(KNOB0_STATUS)
+			add		r28, r20		
+			adc		r29, ZERO
 		    ld	    r18, Y			    ; load KNOBN_STATUS value into r18
 			
 			sbrc	r18, 0				; Check bit 0
 			rjmp	LOAD_ADC			; KNOBN_STATUS is set, so just update parameter
 			mov		r19, r16
 			
-		    ldi	    r28, OLD_ADC_0	    ; 
-		    add	    r28, r20		    ; 
-		    ldi	    r29, 0			    ;
+			ldi		r28, low(OLD_ADC_0)
+			ldi		r29, high(OLD_ADC_0)
+			add		r28, r20		
+			adc		r29, ZERO
 		    ld	    r17, Y			    ; load OLD_ADC_N value into r17
 			sub		r19, r17
 			brpl	DEAD_CHECK
@@ -2225,9 +2088,10 @@ DEAD_CHECK:
 			cpi		r19, 5				 
 			brlo	NO_CHANGE			; Skip ahead if pot change is < the deadzone limit
 			sbr 	r18,1				; Update knob status bit and continue -- pot moved
-			ldi	    r28, KNOB0_STATUS	;
-		    add	    r28, r20		    ; 
-		    ldi	    r29, 0			    ;
+			ldi		r28, low(KNOB0_STATUS)
+			ldi		r29, high(KNOB0_STATUS)
+			add		r28, r20		;
+			adc		r29, ZERO
 		    st      Y, r18			    ; save updated KNOBN_STATUS
 			rjmp 	LOAD_ADC			; 
 
@@ -2295,6 +2159,7 @@ RESET:
 		    sts	    MIDIPBEND_H, r16    ;/ P.BEND = 0
 		    sts	    MIDIMODWHEEL, r16   ; MOD.WHEEL = 0
 			sts		KNOB_SHIFT, r16		; Initialize panel shift switch = 0 (unshifted)
+			sts		VCF_STATUS, r16		; Flag VCF as off (0)
 		    ldi	    r16, 2
 		    sts	    PORTACNT, r16	    ; PORTACNT = 2
 		    ldi	    r16, 255
@@ -2416,9 +2281,10 @@ RESET:
 ;store initial pot positions as OLD_ADC values to avoid snapping to new value unless knob has been moved.
 
 										; Store value of Pot ADC0
-		    ldi	    r28, ADC_0		    ; \
-		    add	    r28, r18		    ; / Y = &ADC_i
-		    ldi	    r29, 0			    ;/
+			ldi		r28, low(ADC_0)
+			ldi		r29, high(ADC_0)
+			add		r28, r18
+			adc		r29, ZERO
 			rcall	ADC_END			    ; r16 = AD(i)
 		    st	    Y, r16			    ; AD(i) --> ADC_i
 
@@ -2892,9 +2758,10 @@ MLP_SKIPSCAN:
 		    rcall	ADC_END			    ; r16 = AD(i)
 		    lds	    r18, ADC_CHAN		;\
 			sts		PREV_ADC_CHAN, r18   ; keep track of which ADC channel we're processing. 
-		    ldi	    r28, ADC_0		    ; \
-		    add	    r28, r18		    ; / Y = &ADC_i
-		    ldi	    r29, 0			    ;/
+			ldi		r28, low(ADC_0)
+			ldi		r29, high(ADC_0)
+			add		r28, r18
+			adc		r29, ZERO
 		    st	    Y, r16			    ; AD(i) --> ADC_i
 
 ;next channel:
@@ -2929,12 +2796,12 @@ CHECK_0:
 			rcall	POT_SCAN			; If so, check if parameter should be updated with pot value in r16
 			tst		r17					
 			breq	EXIT_CHECK_0		; Skip update if pot hasn't been updated
-			sts	    RESONANCE,r16
+			sts	    RESONANCE, r16
 EXIT_CHECK_0:
-			lds		r16, RESONANCE		; Limit resonance				 
-			cpi		r16, 0xf6					;\  
-			BRLO	LOAD_REZ					; | Limit maximum knob resonance to 0xf6 
-			ldi		r16, 0xf6					;/
+			lds		r16, RESONANCE		; Limit resonance				 	
+			cpi		r16, 252					;\  
+			BRLO	LOAD_REZ					; | Limit maximum knob resonance to 252 
+			ldi		r16, 252					;/
 LOAD_REZ:
 		    sts	    RESONANCE,r16
 			rjmp	DONE_KNOBS	
@@ -3117,7 +2984,14 @@ DONE_KNOBS:
 ;-------------------------------------------------------------------------------------------------------------------
 		
 MIDI_VELOCITY:
-; Not implemented, but this is a good spot.		
+
+			; Add velocity control of filter
+
+			lds 	R16, MIDIVELOCITY		; Value is 0..127
+			lsl		R16
+			lds		r17, VCFENVMOD
+			mul		r16, r17
+			sts		VELOCITY_ENVMOD, r1		
 		
 ;-------------------------------------------------------------------------------------------------------------------
 
@@ -3382,7 +3256,10 @@ MLP_PHASE:  cpi	    r17, 1
 		    lds	    r16, RELEASETIME
 		    cpi	    r17, 4
 		    breq	MLP_ENVAR		    ; when "release"
-		    rjmp	MLP_EEXIT		    ; when "stop" or "sustain"
+			lds		r22, SUSTAINLEVEL
+			cpi		r17, 3			; when sustain
+			breq	MLP_ESUSTAIN
+			rjmp	MLP_EEXIT		    ; when "stop" or "sustain"
 
 ;calculate dL:
 
@@ -3423,8 +3300,13 @@ MLP_EDECAY:
 			lds 	r22, SUSTAINLEVEL
 			cp		r22, r21				
 			brlo 	MLP_ESTORE			; Keep going if we haven't hit sustain level
-			ldi	    r16, 3			    ; now sustain
-		    rjmp	MLP_ESTOREP
+			ldi		r16, 3			; now sustain
+			sts		ENVPHASE, r16		; store phase
+MLP_ESUSTAIN:
+			clr		r19			; correct sustain level after decay is done
+			clr		r20
+			mov		r21, r22
+			rjmp	MLP_ESTORE
 			
 MLP_ERELEASE:
             sub	    r19, r16		    ;\
@@ -3466,16 +3348,18 @@ MLP_EEXIT:
 			;ldi		r17, 1
 			;sts		ENVPHASE2, r17		    ; store new phase (attack)
 
-
 MLP_PHASE2:  
 			cpi	    r17, 1
-		    breq    MLP_ENVAr2		    ; when "attack"
+		    breq    MLP_ENVAR2		    ; when "attack"
 			lds		r16, DECAYTIME2
 			cpi		r17, 2
-			breq	MLP_ENVAr2			; when "decay"
+			breq	MLP_ENVAR2			; when "decay"
 		    lds	    r16, RELEASETIME2
 		    cpi	    r17, 4
-		    breq	MLP_ENVAr2		    ; when "release"
+		    breq	MLP_ENVAR2		    ; when "release"
+			lds		r22, SUSTAINLEVEL2
+			cpi		r17, 3			; when sustain
+			breq	MLP_ESUSTAIN2
 		    rjmp	MLP_EEXIT2		    ; when "stop" or "sustain"
 
 ;calculate dL:
@@ -3517,8 +3401,13 @@ MLP_EDECAY2:
 			lds 	r22, SUSTAINLEVEL2
 			cp		r22, r21				
 			brlo 	MLP_ESTORE2			; Keep going if we haven't hit sustain level
-			ldi	    r16, 3			    ; now sustain
-		    rjmp	MLP_ESTOREP2
+			ldi		r16, 3			; now sustain
+			sts		ENVPHASE2, r16		; store phase
+MLP_ESUSTAIN2:
+			clr		r19			; correct sustain level after decay is done
+			clr		r20
+			mov		r21, r22
+			rjmp	MLP_ESTORE2
 			
 MLP_ERELEASE2:
             sub	    r19, r16		    ;\
@@ -3532,6 +3421,7 @@ MLP_BOTTOM2:
 		    ldi	    r20, 0			    ; > L = 0
 		    ldi	    r21, 0			    ;/
 		    ldi	    r16, 0			    ; stop
+			sts		VCF_STATUS, r16		; Flag VCF as off when we hit the bottom limit. 
 
 MLP_ESTOREP2:
             sts	ENVPHASE2, r16		    ; store phase
@@ -3555,7 +3445,20 @@ MLP_EEXIT2:
 
 MLP_KEYOFF:
             ldi	    r16,4			    ;\
-		    sts	    ENVPHASE, r16		;/ "release"
+
+			; don't restart envelope 1 for release if it's already stopped.
+			lds		r17, ENVPHASE
+			tst		r17
+			breq	MLP_NOTEON			; Don't put envelope 1 in release mode if it is already stopped	
+
+		    sts	    ENVPHASE, r16		; "release"
+
+			; don't restart envelope 2 for release if it's already stopped. 
+			lds		r17, ENVPHASE2
+			tst		r17
+			breq	MLP_NOTEON			; Don't put envelope 2 in release mode if it is already stopped	
+			;
+
 			sts		ENVPHASE2, r16		; "release" for envelope 2
 		    rjmp	MLP_NOTEON
 
@@ -3579,8 +3482,9 @@ MLP_KEYON1:
 
 ;envelope starts:	   
 			ldi		r16, 1
-		    sts	    ENVPHASE, r16		;/ attack
+		    sts	    ENVPHASE, r16		; attack
 			sts		ENVPHASE2, r16		; attack for envelope 2
+			sts		VCF_STATUS, r16		; Flag VCF as on
 
 ; LFO starts when note triggered:
 		    ldi	    r16, 255		    ;\
@@ -3622,13 +3526,6 @@ MLP_NLIM4:
 
 ;transpose 1 octave down:
 		    subi	r23, 12			    ; n -= 12		Note range limited to 24..84
-
-; Track which wavetable to use:
-			mov		r25, r23			; Store a copy of the note number in r25
-			subi	r25, 24				; 0..60
-			lsr		r25
-			lsr		r25					; 0..15
-			sts		WAVETABLE, r25		; Save wavetable 0..15 for lookup when generating oscillator
 
 ;portamento:
 		    lds	    r25, NOTE_L		    ;\
@@ -3732,7 +3629,8 @@ MLP_PBX:
 		    add	    r17, r18		    ; r17 = 1,5*LL-128    +64..254
 
 MLP_OM1:
-            rcall	MUL8X8S			    ; r17,r16 = LFO*mod
+			mulsu	r16, r17		; LFOVALUE*LFOLEVEL
+			movw	r16, r0
 		    ldi	    r18, 4			    ;\
 		    rcall	ASr16			    ;/ r17,r16 = LFO*mod / 16
 		    add	    r22, r16		    ;\
@@ -3754,6 +3652,19 @@ MLP_VCOLFO1:
 MLP_VCOLFOX:
             push	r22			        ;\ note# = 0..108
 		    push	r23			        ;/ store for phase delta B
+
+; determine the wavetable for osc A: note = 0..108
+
+; Track which wavetable to use:
+			mov		r25,	r23		; Store a copy of the note number in r25
+			subi	r25,	13			; 13..108
+			brcc	WTA_NOUFL
+			clr		r25
+WTA_NOUFL:
+			lsr		r25
+			lsr		r25			; (108-12-1)/8 = 11
+			lsr		r25			; 0..11
+			sts		WAVETABLE_A, r25	; Save wavetable 0..11 for lookup when generating oscillator
 
 ;phase delta A:
 ;octave A:
@@ -3783,6 +3694,19 @@ MLP_VCOLFOX:
             lds	    r16, PATCH_SWITCH2	; b7 = octave B: 0=down, 1=up
 		    sbrc	r16, SW_OSCB_OCT
 		    subi	r23, 244		    ; n += 12
+
+; determine the wavetable for osc B; r23: note = 0..108,
+; Track which wavetable to use:
+			mov		r25, r23			; Store a copy of the note number in r25
+			subi	r25, 13				; 13..108
+			brcc	WTB_NOUFL
+			clr		r25
+WTB_NOUFL:
+			lsr		r25
+			lsr		r25					; (108-12-1)/8 = 11
+			lsr		r25					; 0..11
+			sts		WAVETABLE_B, r25	; Save wavetable 0..15 for lookup when generating oscillator
+			
 		    rcall	NOTERECALC		    ; r23,r22 = m12 (0,0..11,996),
 						                ; r20 = n12 (0..11)
 		    rcall	LOAD_DELTA		    ; r19:r18:r17:r16 = delta
@@ -3794,7 +3718,6 @@ MLP_VCOLFOX:
  
 
 MLP_VCOX:
-
             ;----
             ;DCF:
             ;----
@@ -3810,17 +3733,17 @@ MLP_VCOX:
 			lds	    r18, PATCH_SWITCH1	; Is the LFO enabled? 
 			sbrs	r18, SW_LFO_ENABLE	
 			ldi		r17, 0				; Set LFO level to zero if switch is off
-		    rcall	MUL8X8S			    ; r17,r16 = LFO * VCFLFOMOD
-		    mov	    r30, r17
-		    ldi	    r31, 0
-		    rol	    r17			        ; r17.7 --> Cy (sign)
-		    sbc	    r31, r31		    ; sign extension to r31
+			mulsu	r16, r17
+			mov		r30, r1
+			ldi		r31, 0
+			rol		r1					; r1.7 --> Cy (sign)
+			sbc		r31, r31			; sign extension to r31
 
 MLP_DCF0:
 
 ;ENV mod:
             lds	    r16, ENV_INTEGr2	; Get the integer part of the filter envelope
-		    lds	    r17, VCFENVMOD
+			lds		r17, VELOCITY_ENVMOD ; Use MIDI velocity * envmod
 			mul		r16, r17
 			movw 	r16,r0				; r17,r16 = FILTER ENV * ENVMOD		    
     		rol	    r16			        ; Cy = r16.7 (for rounding)
@@ -3833,7 +3756,8 @@ MLP_DCF0:
 		    subi	r16, 96	        	; r16 = 2*(n-48) (24/octave)   -96..+96
 		    ldi	    r17, 171
 
-		    rcall	MUL8X8S		        ; r17 = 1,5*(n-48) (16/octave) -64..+64
+			mulsu	r16, r17
+			movw	r16, r0
 		    ldi	    r18, 0			    ;\
 		    sbrc	r17, 7			    ; > r18 = sign extension
 		    ldi	    r18, 255		    ;/  of r17
@@ -3856,32 +3780,43 @@ MLP_DCF1:
 		    ldi	    r16, 255
 
 MLP_DCF2:
-
 			lsr	    r16			        ; 0..127
-		    ldi	    r30, TAB_VCF	    ;\
-    		ldi	    r31, 0			    ;/ Z = &Tab
-		    rcall	TAB_BYTE		    ; r0 = 1.. 255
-		    sts	    LPF_I, r0			; Store Lowpass F value
-			ldi		r16, 10
-			sub 	r0, r16				; Offset HP knob value
+			ldi		r30, low( TAB_VCF)	;\
+			ldi		r31, high( TAB_VCF)	;/ Z = &Tab
+			rcall	TAB_BYTE		; r0 = 1.. 255
+			sts		LPF_I, r16		; Store Lowpass F value
+			subi	r16, 10			; Offset HP knob value
 			brcc	STORE_HPF
-			ldi		r16, 0x00			; Limit HP to min of 0
-			mov		r0, r16
+			ldi		r16, 0x00		; Limit HP to min of 0
 STORE_HPF:
-			sts		HPF_I, r0
+			sts		HPF_I, r16
+
+; Limit resonance at low filter cutoff settings
+			lds		r17, RESONANCE
+			lds		r16, LPF_I
+			cpi		r16, 16
+			brlo	LIMIT_REZ		; Only limit resonance if LPF_I is 0..15
+			mov		r16, r17	
+			rjmp	EXIT_LIMIT_REZ
+LIMIT_REZ:
+			ldi		r30, low( TAB_REZ)	;\
+			ldi		r31, high( TAB_REZ)	;/ Z = &Tab
+			rcall	TAB_BYTE		; r16 = 0..15	; r16 holds maximum allow resonance
+			cp		r16, r17
+			brlo	EXIT_LIMIT_REZ
+			mov		r16, r17
+EXIT_LIMIT_REZ:
+			sts		SCALED_RESONANCE, r16		; Store scaled resonance			
 			
-
-
             ;---------------
             ;sound level:
             ;---------------
 
 MLP_VCAENV:
             lds	    r16,ENV_INTEGR		; 
-		    ldi	    r30, TAB_VCA	    ;\
-		    ldi	    r31, 0			    ;/ Z = &Tab
-		    rcall	TAB_BYTE		    ; r0 = 2..255
-		    mov	    r16, r0
+			ldi		r30, low( TAB_VCA)	;\
+			ldi		r31, high( TAB_VCA)	;/ Z = &Tab
+			rcall	TAB_BYTE			; r0 = 2..255
 MLP_VCAOK:
             sts		LEVEL,r16
             ;-----------------------------------
@@ -3911,80 +3846,1600 @@ MLP_VCAOK:
             ;------------------------
 		    rjmp	MAINLOOP
 
-;-------------------------------------------------------------------------------------------------------------------
+;-----------------------------------------------------------------------------
 ;
 ;*** Bandlimited sawtooth wavetables (each table is 256 bytes long, unsigned integer)
-SAW_LIMIT0: .db $F7,$FE,$FF,$FF,$FE,$FE,$FD,$FC,$FB,$FA,$F9,$F8,$F7,$F6,$F5,$F4,$F3,$F2,$F1,$F0,$EE,$ED,$EC,$EB,$EA,$E9,$E8,$E7,$E6,$E5,$E4,$E3,$E2,$E1,$E0,$DF,$DE,$DD,$DC,$DB,$DA,$D9,$D8,$D7,$D6,$D5,$D4,$D3,$D1,$D0,$CF,$CE,$CD,$CC,$CB,$CA,$C9,$C8,$C7,$C6,$C5,$C4,$C3,$C2,$C1,$C0,$BF,$BE,$BD,$BC,$BB,$BA,$B9,$B8,$B7,$B5,$B4,$B3,$B2,$B1,$B0,$AF,$AE,$AD,$AC,$AB,$AA,$A9,$A8,$A7,$A6,$A5,$A4,$A3,$A2,$A1,$A0,$9F,$9E,$9D,$9C,$9B,$99,$98,$97,$96,$95,$94,$93,$92,$91,$90,$8F,$8E,$8D,$8C,$8B,$8A,$89,$88,$87,$86,$85,$84,$83,$82,$81,$7F,$7E,$7D,$7C,$7B,$7A,$79,$78,$77,$76,$75,$74,$73,$72,$71,$70,$6F,$6E,$6D,$6C,$6B,$6A,$69,$68,$67,$66,$64,$63,$62,$61,$60,$5F,$5E,$5D,$5C,$5B,$5A,$59,$58,$57,$56,$55,$54,$53,$52,$51,$50,$4F,$4E,$4D,$4C,$4B,$4A,$48,$47,$46,$45,$44,$43,$42,$41,$40,$3F,$3E,$3D,$3C,$3B,$3A,$39,$38,$37,$36,$35,$34,$33,$32,$31,$30,$2F,$2E,$2C,$2B,$2A,$29,$28,$27,$26,$25,$24,$23,$22,$21,$20,$1F,$1E,$1D,$1C,$1B,$1A,$19,$18,$17,$16,$15,$14,$13,$12,$11,$0F,$0E,$0D,$0C,$0B,$0A,$09,$08,$07,$06,$05,$04,$03,$02,$01,$01,$00,$00,$01,$08,$7F
-SAW_LIMIT1: .db $F6,$FF,$FF,$FD,$FC,$FA,$FA,$F9,$F8,$F7,$F6,$F5,$F4,$F3,$F2,$F1,$F0,$EF,$EE,$ED,$EC,$EB,$EA,$E9,$E8,$E7,$E6,$E4,$E3,$E3,$E2,$E1,$DF,$DE,$DD,$DD,$DC,$DA,$D9,$D8,$D7,$D6,$D5,$D4,$D3,$D2,$D1,$D0,$CF,$CE,$CD,$CC,$CB,$CA,$C9,$C8,$C7,$C6,$C5,$C4,$C3,$C2,$C1,$C0,$BF,$BE,$BD,$BC,$BB,$BA,$B9,$B8,$B7,$B6,$B5,$B4,$B3,$B2,$B1,$B0,$AF,$AE,$AD,$AC,$AB,$AA,$A9,$A8,$A7,$A6,$A5,$A4,$A3,$A2,$A1,$A0,$9F,$9E,$9D,$9C,$9B,$9A,$99,$98,$97,$96,$95,$94,$93,$92,$91,$90,$8F,$8E,$8D,$8C,$8B,$8A,$89,$88,$87,$86,$85,$84,$83,$82,$81,$7F,$7E,$7D,$7C,$7B,$7A,$79,$78,$77,$76,$75,$74,$73,$72,$71,$70,$6F,$6E,$6D,$6C,$6B,$6A,$69,$68,$67,$66,$65,$64,$63,$62,$61,$60,$5F,$5E,$5D,$5C,$5B,$5A,$59,$58,$57,$56,$55,$54,$53,$52,$51,$50,$4F,$4E,$4D,$4C,$4B,$4A,$49,$48,$47,$46,$45,$44,$43,$42,$41,$40,$3F,$3E,$3D,$3C,$3B,$3A,$39,$38,$37,$36,$35,$34,$33,$32,$31,$30,$2F,$2E,$2D,$2C,$2B,$2A,$29,$28,$27,$26,$25,$23,$22,$22,$21,$20,$1E,$1D,$1C,$1C,$1B,$19,$18,$17,$16,$15,$14,$13,$12,$11,$10,$0F,$0E,$0D,$0C,$0B,$0A,$09,$08,$07,$06,$05,$05,$03,$02,$00,$00,$09,$7F
-SAW_LIMIT2: .db $F7,$FF,$FE,$FD,$FC,$FB,$FA,$F9,$F8,$F7,$F6,$F5,$F4,$F3,$F2,$F0,$EF,$EE,$ED,$EC,$EB,$EA,$E9,$E8,$E7,$E6,$E5,$E4,$E3,$E2,$E1,$E0,$DF,$DE,$DD,$DC,$DB,$DA,$D9,$D8,$D7,$D6,$D5,$D4,$D3,$D2,$D1,$D0,$CF,$CE,$CD,$CC,$CB,$CA,$C9,$C8,$C7,$C6,$C5,$C4,$C3,$C2,$C1,$C0,$BF,$BE,$BD,$BC,$BB,$BA,$B9,$B8,$B7,$B6,$B5,$B4,$B3,$B2,$B1,$B0,$AF,$AE,$AD,$AC,$AB,$AA,$A9,$A8,$A7,$A6,$A5,$A4,$A3,$A2,$A1,$A0,$9F,$9E,$9D,$9C,$9B,$9A,$99,$98,$97,$96,$95,$94,$93,$92,$91,$90,$8F,$8E,$8D,$8C,$8B,$8A,$89,$88,$87,$86,$85,$84,$83,$82,$81,$7F,$7E,$7D,$7C,$7B,$7A,$79,$78,$77,$76,$75,$74,$73,$72,$71,$70,$6F,$6E,$6D,$6C,$6B,$6A,$69,$68,$67,$66,$65,$64,$63,$62,$61,$60,$5F,$5E,$5D,$5C,$5B,$5A,$59,$58,$57,$56,$55,$54,$53,$52,$51,$50,$4F,$4E,$4D,$4C,$4B,$4A,$49,$48,$47,$46,$45,$44,$43,$42,$41,$40,$3F,$3E,$3D,$3C,$3B,$3A,$39,$38,$37,$36,$35,$34,$33,$32,$31,$30,$2F,$2E,$2D,$2C,$2B,$2A,$29,$28,$27,$26,$25,$24,$23,$22,$21,$20,$1F,$1E,$1D,$1C,$1B,$1A,$19,$18,$17,$16,$15,$14,$13,$12,$11,$10,$0F,$0D,$0C,$0B,$0A,$09,$08,$07,$06,$05,$04,$03,$02,$01,$00,$08,$7F
-SAW_LIMIT3: .db $F7,$FF,$FF,$FC,$FC,$FB,$FA,$F9,$F8,$F7,$F6,$F5,$F4,$F3,$F2,$F1,$F0,$EF,$EE,$ED,$EC,$EB,$EA,$E9,$E8,$E7,$E6,$E5,$E4,$E3,$E2,$E1,$E0,$DF,$DD,$DD,$DB,$DB,$D9,$D9,$D7,$D6,$D5,$D4,$D3,$D2,$D1,$D0,$CF,$CE,$CD,$CC,$CB,$CA,$C9,$C8,$C7,$C6,$C5,$C4,$C3,$C2,$C1,$C0,$BF,$BE,$BD,$BC,$BB,$BA,$B9,$B8,$B7,$B6,$B5,$B4,$B3,$B2,$B1,$B0,$AF,$AE,$AD,$AC,$AB,$AA,$A9,$A8,$A7,$A6,$A5,$A4,$A3,$A2,$A1,$A0,$9F,$9E,$9D,$9C,$9B,$9A,$99,$98,$97,$96,$95,$94,$93,$92,$91,$90,$8F,$8E,$8D,$8C,$8B,$8A,$89,$88,$87,$86,$85,$84,$83,$82,$81,$7F,$7E,$7D,$7C,$7B,$7A,$79,$78,$77,$76,$75,$74,$73,$72,$71,$70,$6F,$6E,$6D,$6C,$6B,$6A,$69,$68,$67,$66,$65,$64,$63,$62,$61,$60,$5F,$5E,$5D,$5C,$5B,$5A,$59,$58,$57,$56,$55,$54,$53,$52,$51,$50,$4F,$4E,$4D,$4C,$4B,$4A,$49,$48,$47,$46,$45,$44,$43,$42,$41,$40,$3F,$3E,$3D,$3C,$3B,$3A,$39,$38,$37,$36,$35,$34,$33,$32,$31,$30,$2F,$2E,$2D,$2C,$2B,$2A,$29,$28,$26,$26,$24,$24,$22,$22,$20,$1F,$1E,$1D,$1C,$1B,$1A,$19,$18,$17,$16,$15,$14,$13,$12,$11,$10,$0F,$0E,$0D,$0C,$0B,$0A,$09,$08,$07,$06,$05,$04,$03,$03,$00,$00,$08,$7F
-SAW_LIMIT4: .db $F5,$FF,$FB,$FD,$F8,$FB,$F7,$F7,$F7,$F4,$F5,$F3,$F3,$F1,$F0,$F0,$EE,$EE,$EC,$EB,$EA,$E9,$E9,$E7,$E6,$E5,$E4,$E4,$E2,$E1,$E0,$DF,$DE,$DD,$DC,$DB,$DA,$D9,$D8,$D7,$D6,$D5,$D4,$D3,$D2,$D1,$D0,$CF,$CE,$CD,$CC,$CB,$CA,$C9,$C8,$C7,$C6,$C5,$C4,$C3,$C2,$C1,$C0,$BF,$BE,$BD,$BC,$BB,$BA,$B9,$B8,$B7,$B6,$B5,$B4,$B3,$B2,$B1,$B0,$AF,$AE,$AD,$AC,$AB,$AA,$A9,$A8,$A7,$A6,$A5,$A5,$A3,$A2,$A1,$A0,$A0,$9E,$9D,$9C,$9B,$9B,$99,$99,$97,$96,$95,$94,$94,$92,$91,$90,$8F,$8F,$8D,$8D,$8B,$8A,$8A,$88,$88,$86,$86,$85,$83,$83,$81,$81,$7F,$7E,$7E,$7C,$7C,$7A,$79,$79,$77,$77,$75,$75,$74,$72,$72,$70,$70,$6F,$6E,$6D,$6B,$6B,$6A,$69,$68,$66,$66,$64,$64,$63,$62,$61,$5F,$5F,$5E,$5D,$5C,$5A,$5A,$59,$58,$57,$56,$55,$54,$53,$52,$51,$50,$4F,$4E,$4D,$4C,$4B,$4A,$49,$48,$47,$46,$45,$44,$43,$42,$41,$40,$3F,$3E,$3D,$3C,$3B,$3A,$39,$38,$37,$36,$35,$34,$33,$32,$31,$30,$2F,$2E,$2D,$2C,$2B,$2A,$29,$28,$27,$26,$25,$24,$23,$22,$21,$20,$1F,$1E,$1D,$1B,$1B,$1A,$19,$18,$16,$16,$15,$14,$13,$11,$11,$0F,$0F,$0E,$0C,$0C,$0A,$0B,$08,$08,$08,$04,$07,$02,$04,$00,$0A,$7F
-SAW_LIMIT5: .db $E9,$FF,$F1,$F5,$F7,$F0,$F2,$F3,$EE,$EF,$F0,$EC,$EC,$EC,$E9,$E9,$E9,$E7,$E6,$E6,$E4,$E3,$E3,$E1,$E0,$E1,$DF,$DD,$DE,$DC,$DB,$DB,$D9,$D8,$D8,$D6,$D5,$D5,$D4,$D2,$D2,$D1,$CF,$CF,$CE,$CD,$CC,$CB,$CA,$C9,$C8,$C7,$C6,$C6,$C4,$C4,$C3,$C1,$C1,$C0,$BF,$BE,$BD,$BC,$BB,$BA,$B9,$B8,$B8,$B6,$B5,$B5,$B3,$B2,$B2,$B1,$AF,$AF,$AE,$AD,$AC,$AB,$AA,$A9,$A8,$A7,$A6,$A5,$A4,$A4,$A3,$A1,$A1,$A0,$9E,$9E,$9D,$9C,$9B,$9A,$99,$98,$97,$96,$95,$94,$93,$92,$92,$90,$8F,$8F,$8E,$8D,$8C,$8B,$8A,$89,$88,$87,$86,$85,$84,$83,$82,$81,$81,$7F,$7E,$7E,$7D,$7C,$7B,$7A,$79,$78,$77,$76,$75,$74,$73,$72,$71,$70,$70,$6F,$6D,$6D,$6C,$6B,$6A,$69,$68,$67,$66,$65,$64,$63,$62,$61,$61,$5F,$5E,$5E,$5C,$5B,$5B,$5A,$59,$58,$57,$56,$55,$54,$53,$52,$51,$50,$50,$4E,$4D,$4D,$4C,$4A,$4A,$49,$47,$47,$46,$45,$44,$43,$42,$41,$40,$3F,$3E,$3E,$3C,$3B,$3B,$39,$39,$38,$37,$36,$35,$34,$33,$32,$31,$30,$30,$2E,$2D,$2D,$2B,$2A,$2A,$29,$27,$27,$26,$24,$24,$23,$21,$22,$20,$1E,$1F,$1E,$1C,$1C,$1B,$19,$19,$18,$16,$16,$16,$13,$13,$13,$0F,$10,$11,$0C,$0D,$0F,$08,$0A,$0E,$00,$16,$7F
-SAW_LIMIT6: .db $DC,$FF,$F3,$E9,$F0,$F3,$ED,$E9,$ED,$EE,$E9,$E7,$EA,$E9,$E5,$E4,$E6,$E5,$E1,$E1,$E2,$E0,$DE,$DE,$DE,$DC,$DA,$DB,$DB,$D8,$D7,$D7,$D7,$D5,$D3,$D4,$D3,$D1,$D0,$D0,$CF,$CD,$CD,$CD,$CB,$CA,$C9,$C9,$C8,$C6,$C6,$C5,$C4,$C2,$C2,$C2,$C0,$BF,$BF,$BE,$BC,$BB,$BB,$BA,$B8,$B8,$B7,$B6,$B5,$B4,$B4,$B3,$B1,$B1,$B0,$AF,$AD,$AD,$AD,$AB,$AA,$AA,$A9,$A7,$A6,$A6,$A5,$A4,$A3,$A2,$A1,$A0,$9F,$9F,$9E,$9C,$9C,$9B,$9A,$99,$98,$98,$96,$95,$94,$94,$93,$91,$91,$90,$8F,$8E,$8D,$8D,$8B,$8A,$8A,$89,$87,$87,$86,$85,$84,$83,$83,$81,$80,$80,$7F,$7E,$7C,$7C,$7B,$7A,$79,$78,$78,$76,$75,$75,$74,$72,$72,$71,$70,$6F,$6E,$6E,$6C,$6B,$6B,$6A,$69,$67,$67,$66,$65,$64,$63,$63,$61,$60,$60,$5F,$5E,$5D,$5C,$5B,$5A,$59,$59,$58,$56,$55,$55,$54,$52,$52,$52,$50,$4F,$4E,$4E,$4C,$4B,$4B,$4A,$49,$48,$47,$47,$45,$44,$44,$43,$41,$40,$40,$3F,$3D,$3D,$3D,$3B,$3A,$39,$39,$37,$36,$36,$35,$34,$32,$32,$32,$30,$2F,$2F,$2E,$2C,$2B,$2C,$2A,$28,$28,$28,$27,$24,$24,$25,$23,$21,$21,$21,$1F,$1D,$1E,$1E,$1A,$19,$1B,$1A,$16,$15,$18,$16,$11,$12,$16,$12,$0C,$0F,$16,$0C,$00,$23,$7F
-SAW_LIMIT7: .db $D0,$FC,$FF,$EF,$E7,$ED,$F3,$F1,$EA,$E7,$EA,$ED,$EB,$E6,$E4,$E6,$E8,$E5,$E1,$E0,$E2,$E2,$E0,$DD,$DC,$DE,$DD,$DB,$D9,$D8,$D9,$D9,$D6,$D4,$D4,$D5,$D4,$D1,$D0,$D0,$D0,$CF,$CD,$CB,$CB,$CB,$CA,$C8,$C7,$C7,$C7,$C5,$C3,$C2,$C2,$C2,$C1,$BF,$BE,$BE,$BE,$BC,$BA,$B9,$B9,$B9,$B7,$B6,$B5,$B5,$B4,$B3,$B1,$B1,$B0,$B0,$AE,$AD,$AC,$AC,$AB,$A9,$A8,$A8,$A7,$A6,$A5,$A3,$A3,$A3,$A2,$A0,$9F,$9F,$9E,$9D,$9B,$9A,$9A,$9A,$98,$97,$96,$96,$95,$94,$92,$91,$91,$90,$8F,$8E,$8D,$8D,$8C,$8A,$89,$88,$88,$87,$86,$84,$84,$84,$83,$81,$80,$7F,$7F,$7E,$7C,$7B,$7B,$7B,$79,$78,$77,$77,$76,$75,$73,$72,$72,$71,$70,$6F,$6E,$6E,$6D,$6B,$6A,$69,$69,$68,$67,$65,$65,$65,$64,$62,$61,$60,$60,$5F,$5D,$5C,$5C,$5C,$5A,$59,$58,$57,$57,$56,$54,$53,$53,$52,$51,$4F,$4F,$4E,$4E,$4C,$4B,$4A,$4A,$49,$48,$46,$46,$46,$45,$43,$41,$41,$41,$40,$3E,$3D,$3D,$3D,$3C,$3A,$38,$38,$38,$37,$35,$34,$34,$34,$32,$30,$2F,$2F,$2F,$2E,$2B,$2A,$2B,$2B,$29,$26,$26,$27,$26,$24,$22,$21,$23,$22,$1F,$1D,$1D,$1F,$1E,$1A,$17,$19,$1B,$19,$14,$12,$15,$18,$15,$0E,$0C,$12,$18,$10,$00,$03,$2F,$7F
-SAW_LIMIT8: .db $C1,$EE,$FF,$F9,$EB,$E3,$E4,$EB,$EF,$ED,$E7,$E2,$E1,$E5,$E7,$E6,$E2,$DE,$DD,$DF,$E1,$E0,$DD,$DA,$D8,$D9,$DB,$DA,$D8,$D5,$D3,$D4,$D5,$D5,$D3,$D0,$CE,$CE,$CF,$CF,$CE,$CB,$C9,$C9,$C9,$C9,$C8,$C6,$C4,$C4,$C4,$C4,$C3,$C1,$BF,$BE,$BE,$BE,$BE,$BC,$BA,$B9,$B9,$B9,$B8,$B7,$B5,$B4,$B3,$B3,$B3,$B2,$B0,$AE,$AE,$AE,$AE,$AC,$AB,$A9,$A9,$A8,$A8,$A7,$A5,$A4,$A3,$A3,$A3,$A2,$A0,$9F,$9E,$9E,$9D,$9D,$9B,$99,$98,$98,$98,$97,$96,$94,$93,$93,$93,$92,$91,$8F,$8E,$8D,$8D,$8D,$8B,$8A,$89,$88,$88,$87,$86,$85,$83,$82,$82,$82,$81,$7F,$7E,$7D,$7D,$7D,$7C,$7A,$79,$78,$77,$77,$76,$75,$74,$72,$72,$72,$71,$70,$6E,$6D,$6C,$6C,$6C,$6B,$69,$68,$67,$67,$67,$66,$64,$62,$62,$61,$61,$60,$5F,$5D,$5C,$5C,$5C,$5B,$5A,$58,$57,$57,$56,$56,$54,$53,$51,$51,$51,$51,$4F,$4D,$4C,$4C,$4C,$4B,$4A,$48,$47,$46,$46,$46,$45,$43,$41,$41,$41,$41,$40,$3E,$3C,$3B,$3B,$3B,$3B,$39,$37,$36,$36,$36,$36,$34,$31,$30,$30,$31,$31,$2F,$2C,$2A,$2A,$2B,$2C,$2A,$27,$25,$24,$26,$27,$25,$22,$1F,$1E,$20,$22,$21,$1D,$19,$18,$1A,$1E,$1D,$18,$12,$10,$14,$1B,$1C,$14,$06,$00,$11,$3E,$7F
-SAW_LIMIT9: .db $B6,$E1,$F9,$FF,$F7,$EB,$E2,$E0,$E4,$E9,$ED,$EC,$E7,$E2,$DE,$DE,$E0,$E3,$E4,$E2,$DE,$DB,$D9,$D9,$DB,$DC,$DC,$D9,$D6,$D4,$D3,$D3,$D4,$D5,$D4,$D1,$CF,$CD,$CC,$CD,$CE,$CD,$CC,$CA,$C7,$C6,$C6,$C6,$C7,$C6,$C4,$C2,$C0,$BF,$BF,$C0,$C0,$BF,$BD,$BB,$B9,$B9,$B9,$B9,$B8,$B7,$B5,$B3,$B2,$B2,$B2,$B2,$B1,$B0,$AE,$AC,$AB,$AB,$AB,$AB,$AA,$A8,$A6,$A5,$A5,$A5,$A4,$A4,$A3,$A1,$9F,$9E,$9E,$9E,$9E,$9D,$9B,$9A,$98,$97,$97,$97,$97,$95,$94,$92,$91,$90,$90,$90,$8F,$8E,$8D,$8B,$8A,$8A,$8A,$89,$88,$87,$85,$84,$83,$83,$83,$82,$81,$7F,$7E,$7D,$7C,$7C,$7C,$7B,$7A,$78,$77,$76,$75,$75,$75,$74,$72,$71,$70,$6F,$6F,$6F,$6E,$6D,$6B,$6A,$68,$68,$68,$68,$67,$65,$64,$62,$61,$61,$61,$61,$60,$5E,$5C,$5B,$5B,$5A,$5A,$5A,$59,$57,$55,$54,$54,$54,$54,$53,$51,$4F,$4E,$4D,$4D,$4D,$4D,$4C,$4A,$48,$47,$46,$46,$46,$46,$44,$42,$40,$3F,$3F,$40,$40,$3F,$3D,$3B,$39,$38,$39,$39,$39,$38,$35,$33,$32,$31,$32,$33,$32,$30,$2E,$2B,$2A,$2B,$2C,$2C,$2B,$29,$26,$23,$23,$24,$26,$26,$24,$21,$1D,$1B,$1C,$1F,$21,$21,$1D,$18,$13,$12,$16,$1B,$1F,$1D,$14,$08,$00,$06,$1E,$49,$7F
-SAW_LIMIT10: .db $AB,$D1,$ED,$FC,$FF,$F9,$F0,$E6,$DF,$DE,$E0,$E4,$E9,$EB,$EA,$E7,$E2,$DD,$DA,$DA,$DB,$DE,$DF,$E0,$DE,$DB,$D8,$D5,$D3,$D3,$D4,$D5,$D6,$D6,$D4,$D1,$CF,$CC,$CB,$CB,$CC,$CD,$CD,$CC,$CA,$C8,$C6,$C4,$C3,$C3,$C4,$C4,$C4,$C3,$C1,$BF,$BD,$BB,$BB,$BB,$BB,$BB,$BB,$B9,$B7,$B5,$B4,$B3,$B2,$B3,$B3,$B2,$B2,$B0,$AE,$AC,$AB,$AA,$AA,$AA,$AA,$AA,$A8,$A7,$A5,$A3,$A2,$A2,$A2,$A2,$A1,$A1,$9F,$9E,$9C,$9A,$9A,$99,$99,$99,$99,$98,$96,$95,$93,$92,$91,$91,$91,$90,$90,$8F,$8D,$8B,$8A,$89,$88,$88,$88,$88,$87,$86,$84,$82,$81,$80,$80,$7F,$7F,$7F,$7E,$7D,$7B,$79,$78,$77,$77,$77,$77,$76,$75,$74,$72,$70,$6F,$6F,$6E,$6E,$6E,$6D,$6C,$6A,$69,$67,$66,$66,$66,$66,$65,$65,$63,$61,$60,$5E,$5E,$5D,$5D,$5D,$5D,$5C,$5A,$58,$57,$55,$55,$55,$55,$55,$54,$53,$51,$4F,$4D,$4D,$4C,$4C,$4D,$4C,$4B,$4A,$48,$46,$44,$44,$44,$44,$44,$44,$42,$40,$3E,$3C,$3B,$3B,$3B,$3C,$3C,$3B,$39,$37,$35,$33,$32,$32,$33,$34,$34,$33,$30,$2E,$2B,$29,$29,$2A,$2B,$2C,$2C,$2A,$27,$24,$21,$1F,$20,$21,$24,$25,$25,$22,$1D,$18,$15,$14,$16,$1B,$1F,$21,$20,$19,$0F,$06,$00,$03,$12,$2E,$54,$7F
-SAW_LIMIT11: .db $A2,$C2,$DC,$EF,$FB,$FF,$FD,$F7,$EF,$E6,$E0,$DC,$DB,$DD,$E0,$E3,$E6,$E8,$E7,$E5,$E2,$DE,$DA,$D7,$D5,$D5,$D6,$D8,$D9,$DA,$DA,$D9,$D7,$D4,$D1,$CE,$CC,$CC,$CC,$CC,$CD,$CE,$CE,$CD,$CC,$CA,$C7,$C5,$C3,$C2,$C1,$C1,$C2,$C2,$C2,$C2,$C1,$BF,$BD,$BB,$B9,$B8,$B7,$B6,$B7,$B7,$B7,$B7,$B6,$B5,$B3,$B1,$AF,$AD,$AC,$AC,$AC,$AC,$AC,$AC,$AB,$AA,$A9,$A7,$A5,$A3,$A2,$A1,$A1,$A1,$A1,$A1,$A0,$9F,$9E,$9D,$9B,$99,$98,$97,$96,$96,$96,$96,$95,$95,$94,$92,$91,$8F,$8D,$8C,$8B,$8B,$8B,$8B,$8A,$8A,$89,$88,$86,$85,$83,$82,$80,$80,$80,$80,$7F,$7F,$7F,$7D,$7C,$7A,$79,$77,$76,$75,$75,$74,$74,$74,$74,$73,$72,$70,$6E,$6D,$6B,$6A,$6A,$69,$69,$69,$69,$68,$67,$66,$64,$62,$61,$60,$5F,$5E,$5E,$5E,$5E,$5E,$5D,$5C,$5A,$58,$56,$55,$54,$53,$53,$53,$53,$53,$53,$52,$50,$4E,$4C,$4A,$49,$48,$48,$48,$48,$49,$48,$47,$46,$44,$42,$40,$3E,$3D,$3D,$3D,$3D,$3E,$3E,$3D,$3C,$3A,$38,$35,$33,$32,$31,$31,$32,$33,$33,$33,$33,$31,$2E,$2B,$28,$26,$25,$25,$26,$27,$29,$2A,$2A,$28,$25,$21,$1D,$1A,$18,$17,$19,$1C,$1F,$22,$24,$23,$1F,$19,$10,$08,$02,$00,$04,$10,$23,$3D,$5D,$7F
-SAW_LIMIT12: .db $9C,$B6,$CE,$E2,$F0,$FA,$FF,$FF,$FC,$F6,$EF,$E8,$E2,$DD,$DA,$D9,$DA,$DC,$DF,$E1,$E4,$E5,$E5,$E4,$E2,$DE,$DB,$D7,$D4,$D2,$D1,$D0,$D1,$D1,$D3,$D4,$D4,$D5,$D4,$D2,$D0,$CE,$CB,$C9,$C7,$C5,$C4,$C4,$C4,$C5,$C5,$C6,$C6,$C5,$C4,$C3,$C1,$BF,$BC,$BA,$B9,$B7,$B7,$B7,$B7,$B7,$B7,$B7,$B7,$B6,$B5,$B3,$B2,$B0,$AE,$AC,$AB,$AA,$A9,$A9,$A9,$A9,$A9,$A9,$A8,$A8,$A6,$A5,$A3,$A1,$9F,$9E,$9C,$9C,$9B,$9B,$9B,$9B,$9B,$9B,$9A,$99,$97,$96,$94,$92,$91,$8F,$8E,$8E,$8D,$8D,$8D,$8D,$8D,$8C,$8B,$8A,$89,$87,$85,$83,$82,$81,$80,$80,$80,$80,$7F,$7F,$7F,$7E,$7D,$7C,$7A,$78,$76,$75,$74,$73,$72,$72,$72,$72,$72,$71,$71,$70,$6E,$6D,$6B,$69,$68,$66,$65,$64,$64,$64,$64,$64,$64,$63,$63,$61,$60,$5E,$5C,$5A,$59,$57,$57,$56,$56,$56,$56,$56,$56,$55,$54,$53,$51,$4F,$4D,$4C,$4A,$49,$48,$48,$48,$48,$48,$48,$48,$48,$46,$45,$43,$40,$3E,$3C,$3B,$3A,$39,$39,$3A,$3A,$3B,$3B,$3B,$3A,$38,$36,$34,$31,$2F,$2D,$2B,$2A,$2B,$2B,$2C,$2E,$2E,$2F,$2E,$2D,$2B,$28,$24,$21,$1D,$1B,$1A,$1A,$1B,$1E,$20,$23,$25,$26,$25,$22,$1D,$17,$10,$09,$03,$00,$00,$05,$0F,$1D,$31,$49,$63,$7F
-SAW_LIMIT13: .db $97,$AD,$C2,$D4,$E3,$EF,$F8,$FD,$FF,$FE,$FB,$F6,$F0,$EA,$E4,$DF,$DB,$D8,$D7,$D6,$D7,$D9,$DB,$DD,$DF,$E1,$E1,$E1,$E0,$DF,$DC,$D9,$D6,$D3,$D0,$CE,$CC,$CB,$CA,$CA,$CB,$CC,$CC,$CD,$CE,$CE,$CD,$CC,$CB,$C9,$C7,$C5,$C2,$C0,$BE,$BD,$BB,$BB,$BB,$BB,$BB,$BB,$BC,$BC,$BC,$BB,$BA,$B9,$B7,$B5,$B3,$B1,$AF,$AE,$AC,$AB,$AA,$AA,$AA,$AA,$AA,$AA,$AA,$AA,$A9,$A8,$A7,$A6,$A4,$A2,$A0,$9E,$9D,$9B,$9A,$9A,$99,$99,$99,$99,$99,$99,$99,$98,$97,$96,$94,$93,$91,$8F,$8D,$8C,$8A,$89,$89,$88,$88,$88,$88,$88,$88,$87,$87,$86,$84,$83,$81,$80,$7E,$7C,$7B,$79,$78,$78,$77,$77,$77,$77,$77,$77,$76,$76,$75,$73,$72,$70,$6E,$6C,$6B,$69,$68,$67,$66,$66,$66,$66,$66,$66,$66,$65,$65,$64,$62,$61,$5F,$5D,$5B,$59,$58,$57,$56,$55,$55,$55,$55,$55,$55,$55,$55,$54,$53,$51,$50,$4E,$4C,$4A,$48,$46,$45,$44,$43,$43,$43,$44,$44,$44,$44,$44,$44,$42,$41,$3F,$3D,$3A,$38,$36,$34,$33,$32,$31,$31,$32,$33,$33,$34,$35,$35,$34,$33,$31,$2F,$2C,$29,$26,$23,$20,$1F,$1E,$1E,$1E,$20,$22,$24,$26,$28,$29,$28,$27,$24,$20,$1B,$15,$0F,$09,$04,$01,$00,$02,$07,$10,$1C,$2B,$3D,$52,$68,$7F
-SAW_LIMIT14: .db $92,$A4,$B5,$C4,$D3,$DF,$EA,$F2,$F8,$FD,$FF,$FF,$FE,$FB,$F7,$F3,$EE,$E9,$E4,$DF,$DB,$D8,$D5,$D4,$D3,$D3,$D3,$D4,$D6,$D7,$D9,$DA,$DB,$DC,$DC,$DC,$DB,$DA,$D8,$D6,$D3,$D0,$CE,$CB,$C8,$C6,$C4,$C3,$C2,$C1,$C1,$C1,$C1,$C2,$C2,$C3,$C3,$C3,$C3,$C3,$C2,$C1,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AF,$AE,$AD,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AB,$AA,$A9,$A7,$A6,$A4,$A2,$A0,$9E,$9C,$9B,$99,$98,$97,$97,$96,$96,$96,$96,$96,$96,$96,$96,$95,$95,$94,$93,$91,$90,$8E,$8C,$8A,$89,$87,$85,$84,$82,$81,$81,$80,$80,$80,$80,$80,$7F,$7F,$7F,$7F,$7E,$7E,$7D,$7B,$7A,$78,$76,$75,$73,$71,$6F,$6E,$6C,$6B,$6A,$6A,$69,$69,$69,$69,$69,$69,$69,$69,$68,$68,$67,$66,$64,$63,$61,$5F,$5D,$5B,$59,$58,$56,$55,$54,$53,$53,$53,$53,$53,$53,$53,$53,$53,$53,$52,$51,$50,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3E,$3D,$3C,$3C,$3C,$3C,$3C,$3D,$3D,$3E,$3E,$3E,$3E,$3D,$3C,$3B,$39,$37,$34,$31,$2F,$2C,$29,$27,$25,$24,$23,$23,$23,$24,$25,$26,$28,$29,$2B,$2C,$2C,$2C,$2B,$2A,$27,$24,$20,$1B,$16,$11,$0C,$08,$04,$01,$00,$00,$02,$07,$0D,$15,$20,$2C,$3B,$4A,$5B,$6D,$7F
-SAW_LIMIT15: .db $8E,$9D,$AB,$B9,$C6,$D1,$DC,$E5,$ED,$F3,$F8,$FC,$FE,$FF,$FF,$FD,$FB,$F8,$F4,$F0,$EC,$E8,$E3,$DF,$DB,$D8,$D5,$D2,$D1,$CF,$CF,$CE,$CF,$CF,$D0,$D1,$D2,$D3,$D4,$D5,$D6,$D6,$D6,$D6,$D5,$D4,$D3,$D1,$CF,$CD,$CB,$C8,$C6,$C3,$C1,$BF,$BD,$BB,$BA,$B9,$B8,$B7,$B7,$B7,$B7,$B7,$B7,$B8,$B8,$B8,$B8,$B8,$B8,$B7,$B7,$B6,$B4,$B3,$B1,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A1,$9F,$9E,$9D,$9D,$9C,$9C,$9C,$9B,$9C,$9C,$9C,$9C,$9C,$9B,$9B,$9A,$9A,$99,$98,$96,$95,$93,$91,$8F,$8E,$8C,$8A,$88,$86,$85,$84,$83,$82,$81,$80,$80,$80,$80,$80,$80,$7F,$7F,$7F,$7F,$7F,$7E,$7D,$7C,$7B,$7A,$79,$77,$75,$73,$71,$70,$6E,$6C,$6A,$69,$67,$66,$65,$65,$64,$64,$63,$63,$63,$63,$63,$64,$63,$63,$63,$62,$62,$61,$60,$5E,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4E,$4C,$4B,$49,$48,$48,$47,$47,$47,$47,$47,$47,$48,$48,$48,$48,$48,$48,$47,$46,$45,$44,$42,$40,$3E,$3C,$39,$37,$34,$32,$30,$2E,$2C,$2B,$2A,$29,$29,$29,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$30,$31,$30,$30,$2E,$2D,$2A,$27,$24,$20,$1C,$17,$13,$0F,$0B,$07,$04,$02,$00,$00,$01,$03,$07,$0C,$12,$1A,$23,$2E,$39,$46,$54,$62,$71,$7F 
 
-; Inverse sawtooth wavetables
-INV_SAW0: .db $7F,$08,$01,$00,$00,$01,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$40,$41,$42,$43,$44,$45,$46,$47,$48,$4A,$4B,$4C,$4D,$4E,$4F,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5B,$5C,$5D,$5E,$5F,$60,$61,$62,$63,$64,$66,$67,$68,$69,$6A,$6B,$6C,$6D,$6E,$6F,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$7A,$7B,$7C,$7D,$7E,$7F,$81,$82,$83,$84,$85,$86,$87,$88,$89,$8A,$8B,$8C,$8D,$8E,$8F,$90,$91,$92,$93,$94,$95,$96,$97,$98,$99,$9B,$9C,$9D,$9E,$9F,$A0,$A1,$A2,$A3,$A4,$A5,$A6,$A7,$A8,$A9,$AA,$AB,$AC,$AD,$AE,$AF,$B0,$B1,$B2,$B3,$B4,$B5,$B7,$B8,$B9,$BA,$BB,$BC,$BD,$BE,$BF,$C0,$C1,$C2,$C3,$C4,$C5,$C6,$C7,$C8,$C9,$CA,$CB,$CC,$CD,$CE,$CF,$D0,$D1,$D3,$D4,$D5,$D6,$D7,$D8,$D9,$DA,$DB,$DC,$DD,$DE,$DF,$E0,$E1,$E2,$E3,$E4,$E5,$E6,$E7,$E8,$E9,$EA,$EB,$EC,$ED,$EE,$F0,$F1,$F2,$F3,$F4,$F5,$F6,$F7,$F8,$F9,$FA,$FB,$FC,$FD,$FE,$FE,$FF,$FF,$FE,$F7
-INV_SAW1: .db $7F,$09,$00,$00,$02,$03,$05,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1B,$1C,$1C,$1D,$1E,$20,$21,$22,$22,$23,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$4A,$4B,$4C,$4D,$4E,$4F,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5B,$5C,$5D,$5E,$5F,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$6A,$6B,$6C,$6D,$6E,$6F,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$7A,$7B,$7C,$7D,$7E,$7F,$81,$82,$83,$84,$85,$86,$87,$88,$89,$8A,$8B,$8C,$8D,$8E,$8F,$90,$91,$92,$93,$94,$95,$96,$97,$98,$99,$9A,$9B,$9C,$9D,$9E,$9F,$A0,$A1,$A2,$A3,$A4,$A5,$A6,$A7,$A8,$A9,$AA,$AB,$AC,$AD,$AE,$AF,$B0,$B1,$B2,$B3,$B4,$B5,$B6,$B7,$B8,$B9,$BA,$BB,$BC,$BD,$BE,$BF,$C0,$C1,$C2,$C3,$C4,$C5,$C6,$C7,$C8,$C9,$CA,$CB,$CC,$CD,$CE,$CF,$D0,$D1,$D2,$D3,$D4,$D5,$D6,$D7,$D8,$D9,$DA,$DC,$DD,$DD,$DE,$DF,$E1,$E2,$E3,$E3,$E4,$E6,$E7,$E8,$E9,$EA,$EB,$EC,$ED,$EE,$EF,$F0,$F1,$F2,$F3,$F4,$F5,$F6,$F7,$F8,$F9,$FA,$FA,$FC,$FD,$FF,$FF,$F6
-INV_SAW2: .db $7F,$08,$00,$01,$02,$03,$04,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0F,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$4A,$4B,$4C,$4D,$4E,$4F,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5B,$5C,$5D,$5E,$5F,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$6A,$6B,$6C,$6D,$6E,$6F,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$7A,$7B,$7C,$7D,$7E,$7F,$81,$82,$83,$84,$85,$86,$87,$88,$89,$8A,$8B,$8C,$8D,$8E,$8F,$90,$91,$92,$93,$94,$95,$96,$97,$98,$99,$9A,$9B,$9C,$9D,$9E,$9F,$A0,$A1,$A2,$A3,$A4,$A5,$A6,$A7,$A8,$A9,$AA,$AB,$AC,$AD,$AE,$AF,$B0,$B1,$B2,$B3,$B4,$B5,$B6,$B7,$B8,$B9,$BA,$BB,$BC,$BD,$BE,$BF,$C0,$C1,$C2,$C3,$C4,$C5,$C6,$C7,$C8,$C9,$CA,$CB,$CC,$CD,$CE,$CF,$D0,$D1,$D2,$D3,$D4,$D5,$D6,$D7,$D8,$D9,$DA,$DB,$DC,$DD,$DE,$DF,$E0,$E1,$E2,$E3,$E4,$E5,$E6,$E7,$E8,$E9,$EA,$EB,$EC,$ED,$EE,$EF,$F0,$F2,$F3,$F4,$F5,$F6,$F7,$F8,$F9,$FA,$FB,$FC,$FD,$FE,$FF,$F7
-INV_SAW3: .db $7F,$08,$00,$00,$03,$03,$04,$05,$06,$07,$08,$09,$0A,$0B,$0C,$0D,$0E,$0F,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$1A,$1B,$1C,$1D,$1E,$1F,$20,$22,$22,$24,$24,$26,$26,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$4A,$4B,$4C,$4D,$4E,$4F,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5B,$5C,$5D,$5E,$5F,$60,$61,$62,$63,$64,$65,$66,$67,$68,$69,$6A,$6B,$6C,$6D,$6E,$6F,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$7A,$7B,$7C,$7D,$7E,$7F,$81,$82,$83,$84,$85,$86,$87,$88,$89,$8A,$8B,$8C,$8D,$8E,$8F,$90,$91,$92,$93,$94,$95,$96,$97,$98,$99,$9A,$9B,$9C,$9D,$9E,$9F,$A0,$A1,$A2,$A3,$A4,$A5,$A6,$A7,$A8,$A9,$AA,$AB,$AC,$AD,$AE,$AF,$B0,$B1,$B2,$B3,$B4,$B5,$B6,$B7,$B8,$B9,$BA,$BB,$BC,$BD,$BE,$BF,$C0,$C1,$C2,$C3,$C4,$C5,$C6,$C7,$C8,$C9,$CA,$CB,$CC,$CD,$CE,$CF,$D0,$D1,$D2,$D3,$D4,$D5,$D6,$D7,$D9,$D9,$DB,$DB,$DD,$DD,$DF,$E0,$E1,$E2,$E3,$E4,$E5,$E6,$E7,$E8,$E9,$EA,$EB,$EC,$ED,$EE,$EF,$F0,$F1,$F2,$F3,$F4,$F5,$F6,$F7,$F8,$F9,$FA,$FB,$FC,$FC,$FF,$FF,$F7
-INV_SAW4: .db $7F,$0A,$00,$04,$02,$07,$04,$08,$08,$08,$0B,$0A,$0C,$0C,$0E,$0F,$0F,$11,$11,$13,$14,$15,$16,$16,$18,$19,$1A,$1B,$1B,$1D,$1E,$1F,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$2A,$2B,$2C,$2D,$2E,$2F,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$3A,$3B,$3C,$3D,$3E,$3F,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49,$4A,$4B,$4C,$4D,$4E,$4F,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5A,$5C,$5D,$5E,$5F,$5F,$61,$62,$63,$64,$64,$66,$66,$68,$69,$6A,$6B,$6B,$6D,$6E,$6F,$70,$70,$72,$72,$74,$75,$75,$77,$77,$79,$79,$7A,$7C,$7C,$7E,$7E,$7F,$81,$81,$83,$83,$85,$86,$86,$88,$88,$8A,$8A,$8B,$8D,$8D,$8F,$8F,$90,$91,$92,$94,$94,$95,$96,$97,$99,$99,$9B,$9B,$9C,$9D,$9E,$A0,$A0,$A1,$A2,$A3,$A5,$A5,$A6,$A7,$A8,$A9,$AA,$AB,$AC,$AD,$AE,$AF,$B0,$B1,$B2,$B3,$B4,$B5,$B6,$B7,$B8,$B9,$BA,$BB,$BC,$BD,$BE,$BF,$C0,$C1,$C2,$C3,$C4,$C5,$C6,$C7,$C8,$C9,$CA,$CB,$CC,$CD,$CE,$CF,$D0,$D1,$D2,$D3,$D4,$D5,$D6,$D7,$D8,$D9,$DA,$DB,$DC,$DD,$DE,$DF,$E0,$E1,$E2,$E4,$E4,$E5,$E6,$E7,$E9,$E9,$EA,$EB,$EC,$EE,$EE,$F0,$F0,$F1,$F3,$F3,$F5,$F4,$F7,$F7,$F7,$FB,$F8,$FD,$FB,$FF,$F5
-INV_SAW5: .db $7F,$16,$00,$0E,$0A,$08,$0F,$0D,$0C,$11,$10,$0F,$13,$13,$13,$16,$16,$16,$18,$19,$19,$1B,$1C,$1C,$1E,$1F,$1E,$20,$22,$21,$23,$24,$24,$26,$27,$27,$29,$2A,$2A,$2B,$2D,$2D,$2E,$30,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$39,$3B,$3B,$3C,$3E,$3E,$3F,$40,$41,$42,$43,$44,$45,$46,$47,$47,$49,$4A,$4A,$4C,$4D,$4D,$4E,$50,$50,$51,$52,$53,$54,$55,$56,$57,$58,$59,$5A,$5B,$5B,$5C,$5E,$5E,$5F,$61,$61,$62,$63,$64,$65,$66,$67,$68,$69,$6A,$6B,$6C,$6D,$6D,$6F,$70,$70,$71,$72,$73,$74,$75,$76,$77,$78,$79,$7A,$7B,$7C,$7D,$7E,$7E,$7F,$81,$81,$82,$83,$84,$85,$86,$87,$88,$89,$8A,$8B,$8C,$8D,$8E,$8F,$8F,$90,$92,$92,$93,$94,$95,$96,$97,$98,$99,$9A,$9B,$9C,$9D,$9E,$9E,$A0,$A1,$A1,$A3,$A4,$A4,$A5,$A6,$A7,$A8,$A9,$AA,$AB,$AC,$AD,$AE,$AF,$AF,$B1,$B2,$B2,$B3,$B5,$B5,$B6,$B8,$B8,$B9,$BA,$BB,$BC,$BD,$BE,$BF,$C0,$C1,$C1,$C3,$C4,$C4,$C6,$C6,$C7,$C8,$C9,$CA,$CB,$CC,$CD,$CE,$CF,$CF,$D1,$D2,$D2,$D4,$D5,$D5,$D6,$D8,$D8,$D9,$DB,$DB,$DC,$DE,$DD,$DF,$E1,$E0,$E1,$E3,$E3,$E4,$E6,$E6,$E7,$E9,$E9,$E9,$EC,$EC,$EC,$F0,$EF,$EE,$F3,$F2,$F0,$F7,$F5,$F1,$FF,$E9
-INV_SAW6: .db $7F,$23,$00,$0C,$16,$0F,$0C,$12,$16,$12,$11,$16,$18,$15,$16,$1A,$1B,$19,$1A,$1E,$1E,$1D,$1F,$21,$21,$21,$23,$25,$24,$24,$27,$28,$28,$28,$2A,$2C,$2B,$2C,$2E,$2F,$2F,$30,$32,$32,$32,$34,$35,$36,$36,$37,$39,$39,$3A,$3B,$3D,$3D,$3D,$3F,$40,$40,$41,$43,$44,$44,$45,$47,$47,$48,$49,$4A,$4B,$4B,$4C,$4E,$4E,$4F,$50,$52,$52,$52,$54,$55,$55,$56,$58,$59,$59,$5A,$5B,$5C,$5D,$5E,$5F,$60,$60,$61,$63,$63,$64,$65,$66,$67,$67,$69,$6A,$6B,$6B,$6C,$6E,$6E,$6F,$70,$71,$72,$72,$74,$75,$75,$76,$78,$78,$79,$7A,$7B,$7C,$7C,$7E,$7F,$80,$80,$81,$83,$83,$84,$85,$86,$87,$87,$89,$8A,$8A,$8B,$8D,$8D,$8E,$8F,$90,$91,$91,$93,$94,$94,$95,$96,$98,$98,$99,$9A,$9B,$9C,$9C,$9E,$9F,$9F,$A0,$A1,$A2,$A3,$A4,$A5,$A6,$A6,$A7,$A9,$AA,$AA,$AB,$AD,$AD,$AD,$AF,$B0,$B1,$B1,$B3,$B4,$B4,$B5,$B6,$B7,$B8,$B8,$BA,$BB,$BB,$BC,$BE,$BF,$BF,$C0,$C2,$C2,$C2,$C4,$C5,$C6,$C6,$C8,$C9,$C9,$CA,$CB,$CD,$CD,$CD,$CF,$D0,$D0,$D1,$D3,$D4,$D3,$D5,$D7,$D7,$D7,$D8,$DB,$DB,$DA,$DC,$DE,$DE,$DE,$E0,$E2,$E1,$E1,$E5,$E6,$E4,$E5,$E9,$EA,$E7,$E9,$EE,$ED,$E9,$ED,$F3,$F0,$E9,$F3,$FF,$DC
-INV_SAW7: .db $7F,$2F,$03,$00,$10,$18,$12,$0C,$0E,$15,$18,$15,$12,$14,$19,$1B,$19,$17,$1A,$1E,$1F,$1D,$1D,$1F,$22,$23,$21,$22,$24,$26,$27,$26,$26,$29,$2B,$2B,$2A,$2B,$2E,$2F,$2F,$2F,$30,$32,$34,$34,$34,$35,$37,$38,$38,$38,$3A,$3C,$3D,$3D,$3D,$3E,$40,$41,$41,$41,$43,$45,$46,$46,$46,$48,$49,$4A,$4A,$4B,$4C,$4E,$4E,$4F,$4F,$51,$52,$53,$53,$54,$56,$57,$57,$58,$59,$5A,$5C,$5C,$5C,$5D,$5F,$60,$60,$61,$62,$64,$65,$65,$65,$67,$68,$69,$69,$6A,$6B,$6D,$6E,$6E,$6F,$70,$71,$72,$72,$73,$75,$76,$77,$77,$78,$79,$7B,$7B,$7B,$7C,$7E,$7F,$7F,$80,$81,$83,$84,$84,$84,$86,$87,$88,$88,$89,$8A,$8C,$8D,$8D,$8E,$8F,$90,$91,$91,$92,$94,$95,$96,$96,$97,$98,$9A,$9A,$9A,$9B,$9D,$9E,$9F,$9F,$A0,$A2,$A3,$A3,$A3,$A5,$A6,$A7,$A8,$A8,$A9,$AB,$AC,$AC,$AD,$AE,$B0,$B0,$B1,$B1,$B3,$B4,$B5,$B5,$B6,$B7,$B9,$B9,$B9,$BA,$BC,$BE,$BE,$BE,$BF,$C1,$C2,$C2,$C2,$C3,$C5,$C7,$C7,$C7,$C8,$CA,$CB,$CB,$CB,$CD,$CF,$D0,$D0,$D0,$D1,$D4,$D5,$D4,$D4,$D6,$D9,$D9,$D8,$D9,$DB,$DD,$DE,$DC,$DD,$E0,$E2,$E2,$E0,$E1,$E5,$E8,$E6,$E4,$E6,$EB,$ED,$EA,$E7,$EA,$F1,$F3,$ED,$E7,$EF,$FF,$FC,$D0
-INV_SAW8: .db $7F,$3E,$11,$00,$06,$14,$1C,$1B,$14,$10,$12,$18,$1D,$1E,$1A,$18,$19,$1D,$21,$22,$20,$1E,$1F,$22,$25,$27,$26,$24,$25,$27,$2A,$2C,$2B,$2A,$2A,$2C,$2F,$31,$31,$30,$30,$31,$34,$36,$36,$36,$36,$37,$39,$3B,$3B,$3B,$3B,$3C,$3E,$40,$41,$41,$41,$41,$43,$45,$46,$46,$46,$47,$48,$4A,$4B,$4C,$4C,$4C,$4D,$4F,$51,$51,$51,$51,$53,$54,$56,$56,$57,$57,$58,$5A,$5B,$5C,$5C,$5C,$5D,$5F,$60,$61,$61,$62,$62,$64,$66,$67,$67,$67,$68,$69,$6B,$6C,$6C,$6C,$6D,$6E,$70,$71,$72,$72,$72,$74,$75,$76,$77,$77,$78,$79,$7A,$7C,$7D,$7D,$7D,$7E,$7F,$81,$82,$82,$82,$83,$85,$86,$87,$88,$88,$89,$8A,$8B,$8D,$8D,$8D,$8E,$8F,$91,$92,$93,$93,$93,$94,$96,$97,$98,$98,$98,$99,$9B,$9D,$9D,$9E,$9E,$9F,$A0,$A2,$A3,$A3,$A3,$A4,$A5,$A7,$A8,$A8,$A9,$A9,$AB,$AC,$AE,$AE,$AE,$AE,$B0,$B2,$B3,$B3,$B3,$B4,$B5,$B7,$B8,$B9,$B9,$B9,$BA,$BC,$BE,$BE,$BE,$BE,$BF,$C1,$C3,$C4,$C4,$C4,$C4,$C6,$C8,$C9,$C9,$C9,$C9,$CB,$CE,$CF,$CF,$CE,$CE,$D0,$D3,$D5,$D5,$D4,$D3,$D5,$D8,$DA,$DB,$D9,$D8,$DA,$DD,$E0,$E1,$DF,$DD,$DE,$E2,$E6,$E7,$E5,$E1,$E2,$E7,$ED,$EF,$EB,$E4,$E3,$EB,$F9,$FF,$EE,$C1
-INV_SAW9: .db $7F,$49,$1E,$06,$00,$08,$14,$1D,$1F,$1B,$16,$12,$13,$18,$1D,$21,$21,$1F,$1C,$1B,$1D,$21,$24,$26,$26,$24,$23,$23,$26,$29,$2B,$2C,$2C,$2B,$2A,$2B,$2E,$30,$32,$33,$32,$31,$32,$33,$35,$38,$39,$39,$39,$38,$39,$3B,$3D,$3F,$40,$40,$3F,$3F,$40,$42,$44,$46,$46,$46,$46,$47,$48,$4A,$4C,$4D,$4D,$4D,$4D,$4E,$4F,$51,$53,$54,$54,$54,$54,$55,$57,$59,$5A,$5A,$5A,$5B,$5B,$5C,$5E,$60,$61,$61,$61,$61,$62,$64,$65,$67,$68,$68,$68,$68,$6A,$6B,$6D,$6E,$6F,$6F,$6F,$70,$71,$72,$74,$75,$75,$75,$76,$77,$78,$7A,$7B,$7C,$7C,$7C,$7D,$7E,$7F,$81,$82,$83,$83,$83,$84,$85,$87,$88,$89,$8A,$8A,$8A,$8B,$8D,$8E,$8F,$90,$90,$90,$91,$92,$94,$95,$97,$97,$97,$97,$98,$9A,$9B,$9D,$9E,$9E,$9E,$9E,$9F,$A1,$A3,$A4,$A4,$A5,$A5,$A5,$A6,$A8,$AA,$AB,$AB,$AB,$AB,$AC,$AE,$B0,$B1,$B2,$B2,$B2,$B2,$B3,$B5,$B7,$B8,$B9,$B9,$B9,$B9,$BB,$BD,$BF,$C0,$C0,$BF,$BF,$C0,$C2,$C4,$C6,$C7,$C6,$C6,$C6,$C7,$CA,$CC,$CD,$CE,$CD,$CC,$CD,$CF,$D1,$D4,$D5,$D4,$D3,$D3,$D4,$D6,$D9,$DC,$DC,$DB,$D9,$D9,$DB,$DE,$E2,$E4,$E3,$E0,$DE,$DE,$E2,$E7,$EC,$ED,$E9,$E4,$E0,$E2,$EB,$F7,$FF,$F9,$E1,$B6
-INV_SAW10:.db $7F,$54,$2E,$12,$03,$00,$06,$0F,$19,$20,$21,$1F,$1B,$16,$14,$15,$18,$1D,$22,$25,$25,$24,$21,$20,$1F,$21,$24,$27,$2A,$2C,$2C,$2B,$2A,$29,$29,$2B,$2E,$30,$33,$34,$34,$33,$32,$32,$33,$35,$37,$39,$3B,$3C,$3C,$3B,$3B,$3B,$3C,$3E,$40,$42,$44,$44,$44,$44,$44,$44,$46,$48,$4A,$4B,$4C,$4D,$4C,$4C,$4D,$4D,$4F,$51,$53,$54,$55,$55,$55,$55,$55,$57,$58,$5A,$5C,$5D,$5D,$5D,$5D,$5E,$5E,$60,$61,$63,$65,$65,$66,$66,$66,$66,$67,$69,$6A,$6C,$6D,$6E,$6E,$6E,$6F,$6F,$70,$72,$74,$75,$76,$77,$77,$77,$77,$78,$79,$7B,$7D,$7E,$7F,$7F,$7F,$80,$80,$81,$82,$84,$86,$87,$88,$88,$88,$88,$89,$8A,$8B,$8D,$8F,$90,$90,$91,$91,$91,$92,$93,$95,$96,$98,$99,$99,$99,$99,$9A,$9A,$9C,$9E,$9F,$A1,$A1,$A2,$A2,$A2,$A2,$A3,$A5,$A7,$A8,$AA,$AA,$AA,$AA,$AA,$AB,$AC,$AE,$B0,$B2,$B2,$B3,$B3,$B2,$B3,$B4,$B5,$B7,$B9,$BB,$BB,$BB,$BB,$BB,$BB,$BD,$BF,$C1,$C3,$C4,$C4,$C4,$C3,$C3,$C4,$C6,$C8,$CA,$CC,$CD,$CD,$CC,$CB,$CB,$CC,$CF,$D1,$D4,$D6,$D6,$D5,$D4,$D3,$D3,$D5,$D8,$DB,$DE,$E0,$DF,$DE,$DB,$DA,$DA,$DD,$E2,$E7,$EA,$EB,$E9,$E4,$E0,$DE,$DF,$E6,$F0,$F9,$FF,$FC,$ED,$D1,$AB
-INV_SAW11:.db $7F,$5D,$3D,$23,$10,$04,$00,$02,$08,$10,$19,$1F,$23,$24,$22,$1F,$1C,$19,$17,$18,$1A,$1D,$21,$25,$28,$2A,$2A,$29,$27,$26,$25,$25,$26,$28,$2B,$2E,$31,$33,$33,$33,$33,$32,$31,$31,$32,$33,$35,$38,$3A,$3C,$3D,$3E,$3E,$3D,$3D,$3D,$3D,$3E,$40,$42,$44,$46,$47,$48,$49,$48,$48,$48,$48,$49,$4A,$4C,$4E,$50,$52,$53,$53,$53,$53,$53,$53,$54,$55,$56,$58,$5A,$5C,$5D,$5E,$5E,$5E,$5E,$5E,$5F,$60,$61,$62,$64,$66,$67,$68,$69,$69,$69,$69,$6A,$6A,$6B,$6D,$6E,$70,$72,$73,$74,$74,$74,$74,$75,$75,$76,$77,$79,$7A,$7C,$7D,$7F,$7F,$7F,$80,$80,$80,$80,$82,$83,$85,$86,$88,$89,$8A,$8A,$8B,$8B,$8B,$8B,$8C,$8D,$8F,$91,$92,$94,$95,$95,$96,$96,$96,$96,$97,$98,$99,$9B,$9D,$9E,$9F,$A0,$A1,$A1,$A1,$A1,$A1,$A2,$A3,$A5,$A7,$A9,$AA,$AB,$AC,$AC,$AC,$AC,$AC,$AC,$AD,$AF,$B1,$B3,$B5,$B6,$B7,$B7,$B7,$B7,$B6,$B7,$B8,$B9,$BB,$BD,$BF,$C1,$C2,$C2,$C2,$C2,$C1,$C1,$C2,$C3,$C5,$C7,$CA,$CC,$CD,$CE,$CE,$CD,$CC,$CC,$CC,$CC,$CE,$D1,$D4,$D7,$D9,$DA,$DA,$D9,$D8,$D6,$D5,$D5,$D7,$DA,$DE,$E2,$E5,$E7,$E8,$E6,$E3,$E0,$DD,$DB,$DC,$E0,$E6,$EF,$F7,$FD,$FF,$FB,$EF,$DC,$C2,$A2
-INV_SAW12:.db $7F,$63,$49,$31,$1D,$0F,$05,$00,$00,$03,$09,$10,$17,$1D,$22,$25,$26,$25,$23,$20,$1E,$1B,$1A,$1A,$1B,$1D,$21,$24,$28,$2B,$2D,$2E,$2F,$2E,$2E,$2C,$2B,$2B,$2A,$2B,$2D,$2F,$31,$34,$36,$38,$3A,$3B,$3B,$3B,$3A,$3A,$39,$39,$3A,$3B,$3C,$3E,$40,$43,$45,$46,$48,$48,$48,$48,$48,$48,$48,$48,$49,$4A,$4C,$4D,$4F,$51,$53,$54,$55,$56,$56,$56,$56,$56,$56,$57,$57,$59,$5A,$5C,$5E,$60,$61,$63,$63,$64,$64,$64,$64,$64,$64,$65,$66,$68,$69,$6B,$6D,$6E,$70,$71,$71,$72,$72,$72,$72,$72,$73,$74,$75,$76,$78,$7A,$7C,$7D,$7E,$7F,$7F,$7F,$80,$80,$80,$80,$81,$82,$83,$85,$87,$89,$8A,$8B,$8C,$8D,$8D,$8D,$8D,$8D,$8E,$8E,$8F,$91,$92,$94,$96,$97,$99,$9A,$9B,$9B,$9B,$9B,$9B,$9B,$9C,$9C,$9E,$9F,$A1,$A3,$A5,$A6,$A8,$A8,$A9,$A9,$A9,$A9,$A9,$A9,$AA,$AB,$AC,$AE,$B0,$B2,$B3,$B5,$B6,$B7,$B7,$B7,$B7,$B7,$B7,$B7,$B7,$B9,$BA,$BC,$BF,$C1,$C3,$C4,$C5,$C6,$C6,$C5,$C5,$C4,$C4,$C4,$C5,$C7,$C9,$CB,$CE,$D0,$D2,$D4,$D5,$D4,$D4,$D3,$D1,$D1,$D0,$D1,$D2,$D4,$D7,$DB,$DE,$E2,$E4,$E5,$E5,$E4,$E1,$DF,$DC,$DA,$D9,$DA,$DD,$E2,$E8,$EF,$F6,$FC,$FF,$FF,$FA,$F0,$E2,$CE,$B6,$9C
-INV_SAW13:.db $7F,$68,$52,$3D,$2B,$1C,$10,$07,$02,$00,$01,$04,$09,$0F,$15,$1B,$20,$24,$27,$28,$29,$28,$26,$24,$22,$20,$1E,$1E,$1E,$1F,$20,$23,$26,$29,$2C,$2F,$31,$33,$34,$35,$35,$34,$33,$33,$32,$31,$31,$32,$33,$34,$36,$38,$3A,$3D,$3F,$41,$42,$44,$44,$44,$44,$44,$44,$43,$43,$43,$44,$45,$46,$48,$4A,$4C,$4E,$50,$51,$53,$54,$55,$55,$55,$55,$55,$55,$55,$55,$56,$57,$58,$59,$5B,$5D,$5F,$61,$62,$64,$65,$65,$66,$66,$66,$66,$66,$66,$66,$67,$68,$69,$6B,$6C,$6E,$70,$72,$73,$75,$76,$76,$77,$77,$77,$77,$77,$77,$78,$78,$79,$7B,$7C,$7E,$80,$81,$83,$84,$86,$87,$87,$88,$88,$88,$88,$88,$88,$89,$89,$8A,$8C,$8D,$8F,$91,$93,$94,$96,$97,$98,$99,$99,$99,$99,$99,$99,$99,$9A,$9A,$9B,$9D,$9E,$A0,$A2,$A4,$A6,$A7,$A8,$A9,$AA,$AA,$AA,$AA,$AA,$AA,$AA,$AA,$AB,$AC,$AE,$AF,$B1,$B3,$B5,$B7,$B9,$BA,$BB,$BC,$BC,$BC,$BB,$BB,$BB,$BB,$BB,$BB,$BD,$BE,$C0,$C2,$C5,$C7,$C9,$CB,$CC,$CD,$CE,$CE,$CD,$CC,$CC,$CB,$CA,$CA,$CB,$CC,$CE,$D0,$D3,$D6,$D9,$DC,$DF,$E0,$E1,$E1,$E1,$DF,$DD,$DB,$D9,$D7,$D6,$D7,$D8,$DB,$DF,$E4,$EA,$F0,$F6,$FB,$FE,$FF,$FD,$F8,$EF,$E3,$D4,$C2,$AD,$97
-INV_SAW14:.db $7F,$6D,$5B,$4A,$3B,$2C,$20,$15,$0D,$07,$02,$00,$00,$01,$04,$08,$0C,$11,$16,$1B,$20,$24,$27,$2A,$2B,$2C,$2C,$2C,$2B,$29,$28,$26,$25,$24,$23,$23,$23,$24,$25,$27,$29,$2C,$2F,$31,$34,$37,$39,$3B,$3C,$3D,$3E,$3E,$3E,$3E,$3D,$3D,$3C,$3C,$3C,$3C,$3C,$3D,$3E,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$50,$51,$52,$53,$53,$53,$53,$53,$53,$53,$53,$53,$53,$54,$55,$56,$58,$59,$5B,$5D,$5F,$61,$63,$64,$66,$67,$68,$68,$69,$69,$69,$69,$69,$69,$69,$69,$6A,$6A,$6B,$6C,$6E,$6F,$71,$73,$75,$76,$78,$7A,$7B,$7D,$7E,$7E,$7F,$7F,$7F,$7F,$80,$80,$80,$80,$80,$81,$81,$82,$84,$85,$87,$89,$8A,$8C,$8E,$90,$91,$93,$94,$95,$95,$96,$96,$96,$96,$96,$96,$96,$96,$97,$97,$98,$99,$9B,$9C,$9E,$A0,$A2,$A4,$A6,$A7,$A9,$AA,$AB,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AC,$AD,$AE,$AF,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C1,$C2,$C3,$C3,$C3,$C3,$C3,$C2,$C2,$C1,$C1,$C1,$C1,$C2,$C3,$C4,$C6,$C8,$CB,$CE,$D0,$D3,$D6,$D8,$DA,$DB,$DC,$DC,$DC,$DB,$DA,$D9,$D7,$D6,$D4,$D3,$D3,$D3,$D4,$D5,$D8,$DB,$DF,$E4,$E9,$EE,$F3,$F7,$FB,$FE,$FF,$FF,$FD,$F8,$F2,$EA,$DF,$D3,$C4,$B5,$A4,$92
-INV_SAW15:.db $7F,$71,$62,$54,$46,$39,$2E,$23,$1A,$12,$0C,$07,$03,$01,$00,$00,$02,$04,$07,$0B,$0F,$13,$17,$1C,$20,$24,$27,$2A,$2D,$2E,$30,$30,$31,$30,$30,$2F,$2E,$2D,$2C,$2B,$2A,$29,$29,$29,$29,$2A,$2B,$2C,$2E,$30,$32,$34,$37,$39,$3C,$3E,$40,$42,$44,$45,$46,$47,$48,$48,$48,$48,$48,$48,$47,$47,$47,$47,$47,$47,$48,$48,$49,$4B,$4C,$4E,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5E,$60,$61,$62,$62,$63,$63,$63,$64,$63,$63,$63,$63,$63,$64,$64,$65,$65,$66,$67,$69,$6A,$6C,$6E,$70,$71,$73,$75,$77,$79,$7A,$7B,$7C,$7D,$7E,$7F,$7F,$7F,$7F,$7F,$80,$80,$80,$80,$80,$80,$81,$82,$83,$84,$85,$86,$88,$8A,$8C,$8E,$8F,$91,$93,$95,$96,$98,$99,$9A,$9A,$9B,$9B,$9C,$9C,$9C,$9C,$9C,$9B,$9C,$9C,$9C,$9D,$9D,$9E,$9F,$A1,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B1,$B3,$B4,$B6,$B7,$B7,$B8,$B8,$B8,$B8,$B8,$B8,$B7,$B7,$B7,$B7,$B7,$B7,$B8,$B9,$BA,$BB,$BD,$BF,$C1,$C3,$C6,$C8,$CB,$CD,$CF,$D1,$D3,$D4,$D5,$D6,$D6,$D6,$D6,$D5,$D4,$D3,$D2,$D1,$D0,$CF,$CF,$CE,$CF,$CF,$D1,$D2,$D5,$D8,$DB,$DF,$E3,$E8,$EC,$F0,$F4,$F8,$FB,$FD,$FF,$FF,$FE,$FC,$F8,$F3,$ED,$E5,$DC,$D1,$C6,$B9,$AB,$9D,$8E
+INV_SAW0:
+	; base freqency: 25.96 Hz, discrets: 701, rms: 7.95, min: -0.87, max: 0.87
+
+	.db	  128,   18,   17,   21,    22,   22,   22,   24
+	.db	   25,   25,   26,   27,    28,   29,   30,   31
+	.db	   32,   32,   33,   34,    35,   36,   37,   38
+	.db	   39,   39,   40,   41,    42,   43,   44,   45
+
+	.db	   45,   46,   47,   48,    49,   50,   51,   52
+	.db	   52,   53,   54,   55,    56,   57,   58,   58
+	.db	   59,   60,   61,   62,    63,   64,   65,   65
+	.db	   66,   67,   68,   69,    70,   71,   71,   72
+
+	.db	   73,   74,   75,   76,    77,   77,   78,   79
+	.db	   80,   81,   82,   83,    83,   84,   85,   86
+	.db	   87,   88,   89,   89,    90,   91,   92,   93
+	.db	   94,   95,   96,   96,    97,   98,   99,  100
+
+	.db	  101,  102,  102,  103,   104,  105,  106,  107
+	.db	  108,  109,  109,  110,   111,  112,  113,  114
+	.db	  115,  115,  116,  117,   118,  119,  120,  121
+	.db	  122,  122,  123,  124,   125,  126,  127,  128
+
+	.db	  128,  128,  129,  130,   131,  132,  133,  134
+	.db	  134,  135,  136,  137,   138,  139,  140,  141
+	.db	  141,  142,  143,  144,   145,  146,  147,  147
+	.db	  148,  149,  150,  151,   152,  153,  154,  154
+
+	.db	  155,  156,  157,  158,   159,  160,  160,  161
+	.db	  162,  163,  164,  165,   166,  167,  167,  168
+	.db	  169,  170,  171,  172,   173,  173,  174,  175
+	.db	  176,  177,  178,  179,   179,  180,  181,  182
+
+	.db	  183,  184,  185,  185,   186,  187,  188,  189
+	.db	  190,  191,  191,  192,   193,  194,  195,  196
+	.db	  197,  198,  198,  199,   200,  201,  202,  203
+	.db	  204,  204,  205,  206,   207,  208,  209,  210
+
+	.db	  211,  211,  212,  213,   214,  215,  216,  217
+	.db	  217,  218,  219,  220,   221,  222,  223,  224
+	.db	  224,  225,  226,  227,   228,  229,  230,  231
+	.db	  231,  232,  234,  234,   234,  235,  239,  238
 
 
-;*** Bandlimited square wavetables
-SQ_LIMIT0: .db $F2,$FB,$FC,$FD,$FE,$FE,$FE,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FE,$FE,$FE,$FD,$FC,$FB,$F2,$80,$0D,$04,$03,$02,$01,$01,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$01,$01,$01,$02,$03,$04,$0D,$7F
-SQ_LIMIT1: .db $F4,$FE,$FF,$FE,$FE,$FD,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FD,$FE,$FE,$FF,$FE,$F4,$80,$0B,$01,$00,$01,$01,$02,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$02,$01,$01,$00,$01,$0B,$7F
-SQ_LIMIT2: .db $F6,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$F6,$80,$09,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$00,$09,$7F
-SQ_LIMIT3: .db $F6,$FE,$FF,$FE,$FF,$FE,$FF,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FE,$FF,$FE,$FF,$FE,$FF,$FE,$F6,$80,$09,$01,$00,$01,$00,$01,$00,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00,$01,$00,$01,$00,$01,$09,$7F
-SQ_LIMIT4: .db $F4,$FF,$FC,$FF,$FB,$FE,$FC,$FD,$FD,$FC,$FE,$FC,$FE,$FD,$FD,$FE,$FD,$FE,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FD,$FE,$FD,$FE,$FD,$FD,$FE,$FC,$FE,$FC,$FD,$FD,$FC,$FE,$FB,$FF,$FC,$FF,$F4,$80,$0B,$00,$03,$00,$04,$01,$03,$02,$02,$03,$01,$03,$01,$02,$02,$01,$02,$01,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$02,$01,$02,$01,$02,$02,$01,$03,$01,$03,$02,$02,$03,$01,$04,$00,$03,$00,$0B,$7F
-SQ_LIMIT5: .db $E9,$FF,$F2,$F7,$FA,$F4,$F7,$F9,$F5,$F7,$F8,$F5,$F7,$F8,$F6,$F7,$F8,$F6,$F7,$F8,$F6,$F7,$F8,$F6,$F7,$F8,$F6,$F7,$F7,$F6,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F7,$F7,$F6,$F6,$F7,$F7,$F6,$F8,$F7,$F6,$F8,$F7,$F6,$F8,$F7,$F6,$F8,$F7,$F6,$F8,$F7,$F5,$F8,$F7,$F5,$F9,$F7,$F4,$FA,$F7,$F2,$FF,$E9,$80,$16,$00,$0D,$08,$05,$0B,$08,$06,$0A,$08,$07,$0A,$08,$07,$09,$08,$07,$09,$08,$07,$09,$08,$07,$09,$08,$07,$09,$08,$08,$09,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$08,$08,$09,$09,$08,$08,$09,$07,$08,$09,$07,$08,$09,$07,$08,$09,$07,$08,$09,$07,$08,$0A,$07,$08,$0A,$06,$08,$0B,$05,$08,$0D,$00,$16,$7F
-SQ_LIMIT6: .db $DB,$FF,$F5,$EB,$F3,$F7,$F2,$EF,$F3,$F5,$F1,$F0,$F4,$F4,$F1,$F1,$F4,$F4,$F1,$F1,$F4,$F3,$F1,$F2,$F4,$F3,$F1,$F2,$F3,$F3,$F1,$F2,$F3,$F2,$F1,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F2,$F2,$F2,$F3,$F2,$F2,$F2,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F2,$F2,$F3,$F3,$F1,$F2,$F3,$F2,$F1,$F3,$F3,$F2,$F1,$F3,$F4,$F2,$F1,$F3,$F4,$F1,$F1,$F4,$F4,$F1,$F1,$F4,$F4,$F0,$F1,$F5,$F3,$EF,$F2,$F7,$F3,$EB,$F5,$FF,$DB,$80,$24,$00,$0A,$14,$0C,$08,$0D,$10,$0C,$0A,$0E,$0F,$0B,$0B,$0E,$0E,$0B,$0B,$0E,$0E,$0B,$0C,$0E,$0D,$0B,$0C,$0E,$0D,$0C,$0C,$0E,$0D,$0C,$0D,$0E,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0D,$0D,$0D,$0C,$0D,$0D,$0D,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0D,$0D,$0C,$0C,$0E,$0D,$0C,$0D,$0E,$0C,$0C,$0D,$0E,$0C,$0B,$0D,$0E,$0C,$0B,$0E,$0E,$0B,$0B,$0E,$0E,$0B,$0B,$0F,$0E,$0A,$0C,$10,$0D,$08,$0C,$14,$0A,$00,$24,$7F
-SQ_LIMIT7: .db $CE,$FB,$FF,$F1,$E9,$EF,$F7,$F6,$F0,$ED,$F1,$F5,$F4,$F0,$EF,$F2,$F4,$F3,$F0,$F0,$F2,$F4,$F3,$F0,$F0,$F2,$F3,$F2,$F0,$F0,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F1,$F1,$F1,$F3,$F3,$F1,$F1,$F1,$F3,$F3,$F1,$F1,$F1,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F1,$F1,$F2,$F3,$F2,$F0,$F0,$F2,$F3,$F2,$F0,$F0,$F3,$F4,$F2,$F0,$F0,$F3,$F4,$F2,$EF,$F0,$F4,$F5,$F1,$ED,$F0,$F6,$F7,$EF,$E9,$F1,$FF,$FB,$CE,$80,$31,$04,$00,$0E,$16,$10,$08,$09,$0F,$12,$0E,$0A,$0B,$0F,$10,$0D,$0B,$0C,$0F,$0F,$0D,$0B,$0C,$0F,$0F,$0D,$0C,$0D,$0F,$0F,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0E,$0E,$0E,$0C,$0C,$0E,$0E,$0E,$0C,$0C,$0E,$0E,$0E,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0E,$0E,$0D,$0C,$0D,$0F,$0F,$0D,$0C,$0D,$0F,$0F,$0C,$0B,$0D,$0F,$0F,$0C,$0B,$0D,$10,$0F,$0B,$0A,$0E,$12,$0F,$09,$08,$10,$16,$0E,$00,$04,$31,$7F
-SQ_LIMIT8: .db $C1,$EE,$FF,$F9,$EC,$E6,$E9,$F0,$F5,$F3,$ED,$EA,$EB,$EF,$F2,$F1,$EE,$EB,$EC,$EF,$F1,$F1,$EE,$EC,$EC,$EF,$F1,$F0,$EE,$ED,$ED,$EE,$F0,$F0,$EF,$ED,$ED,$EE,$F0,$F0,$EF,$ED,$ED,$EE,$F0,$F0,$EF,$ED,$ED,$EE,$EF,$F0,$EF,$EE,$ED,$EE,$EF,$F0,$EF,$EE,$ED,$EE,$EF,$F0,$EF,$EE,$ED,$EE,$EF,$F0,$EF,$EE,$ED,$EE,$EF,$F0,$EF,$EE,$ED,$ED,$EF,$F0,$F0,$EE,$ED,$ED,$EF,$F0,$F0,$EE,$ED,$ED,$EF,$F0,$F0,$EE,$ED,$ED,$EE,$F0,$F1,$EF,$EC,$EC,$EE,$F1,$F1,$EF,$EC,$EB,$EE,$F1,$F2,$EF,$EB,$EA,$ED,$F3,$F5,$F0,$E9,$E6,$EC,$F9,$FF,$EE,$C1,$80,$3E,$11,$00,$06,$13,$19,$16,$0F,$0A,$0C,$12,$15,$14,$10,$0D,$0E,$11,$14,$13,$10,$0E,$0E,$11,$13,$13,$10,$0E,$0F,$11,$12,$12,$11,$0F,$0F,$10,$12,$12,$11,$0F,$0F,$10,$12,$12,$11,$0F,$0F,$10,$12,$12,$11,$10,$0F,$10,$11,$12,$11,$10,$0F,$10,$11,$12,$11,$10,$0F,$10,$11,$12,$11,$10,$0F,$10,$11,$12,$11,$10,$0F,$10,$11,$12,$12,$10,$0F,$0F,$11,$12,$12,$10,$0F,$0F,$11,$12,$12,$10,$0F,$0F,$11,$12,$12,$11,$0F,$0E,$10,$13,$13,$11,$0E,$0E,$10,$13,$14,$11,$0E,$0D,$10,$14,$15,$12,$0C,$0A,$0F,$16,$19,$13,$06,$00,$11,$3E,$7F
-SQ_LIMIT9: .db $B6,$E1,$F9,$FF,$F8,$ED,$E5,$E5,$EA,$F0,$F4,$F3,$EF,$EA,$E8,$EA,$ED,$F1,$F2,$F0,$ED,$EA,$EA,$EC,$EF,$F0,$F0,$EE,$EC,$EB,$EB,$ED,$EF,$F0,$EF,$ED,$EC,$EB,$EC,$EE,$F0,$EF,$EE,$EC,$EB,$EC,$ED,$EF,$EF,$EF,$ED,$EC,$EC,$ED,$EE,$EF,$EF,$EE,$ED,$EC,$EC,$ED,$EF,$EF,$EF,$ED,$EC,$EC,$ED,$EE,$EF,$EF,$EE,$ED,$EC,$EC,$ED,$EF,$EF,$EF,$ED,$EC,$EB,$EC,$EE,$EF,$F0,$EE,$EC,$EB,$EC,$ED,$EF,$F0,$EF,$ED,$EB,$EB,$EC,$EE,$F0,$F0,$EF,$EC,$EA,$EA,$ED,$F0,$F2,$F1,$ED,$EA,$E8,$EA,$EF,$F3,$F4,$F0,$EA,$E5,$E5,$ED,$F8,$FF,$F9,$E1,$B6,$80,$49,$1E,$06,$00,$07,$12,$1A,$1A,$15,$0F,$0B,$0C,$10,$15,$17,$15,$12,$0E,$0D,$0F,$12,$15,$15,$13,$10,$0F,$0F,$11,$13,$14,$14,$12,$10,$0F,$10,$12,$13,$14,$13,$11,$0F,$10,$11,$13,$14,$13,$12,$10,$10,$10,$12,$13,$13,$12,$11,$10,$10,$11,$12,$13,$13,$12,$10,$10,$10,$12,$13,$13,$12,$11,$10,$10,$11,$12,$13,$13,$12,$10,$10,$10,$12,$13,$14,$13,$11,$10,$0F,$11,$13,$14,$13,$12,$10,$0F,$10,$12,$14,$14,$13,$11,$0F,$0F,$10,$13,$15,$15,$12,$0F,$0D,$0E,$12,$15,$17,$15,$10,$0C,$0B,$0F,$15,$1A,$1A,$12,$07,$00,$06,$1E,$49,$7F
-SQ_LIMIT10: .db $AA,$CF,$EB,$FA,$FF,$FB,$F3,$EA,$E4,$E3,$E5,$EA,$EF,$F3,$F3,$F2,$EE,$EA,$E8,$E7,$E9,$EC,$EF,$F1,$F1,$EF,$ED,$EB,$E9,$E9,$EA,$EC,$EF,$F0,$F0,$EE,$ED,$EB,$EA,$EA,$EB,$ED,$EE,$EF,$EF,$EE,$EC,$EB,$EA,$EA,$EB,$ED,$EE,$EF,$EF,$EE,$EC,$EB,$EA,$EA,$EC,$ED,$EF,$EF,$EF,$ED,$EC,$EA,$EA,$EB,$EC,$EE,$EF,$EF,$EE,$ED,$EB,$EA,$EA,$EB,$EC,$EE,$EF,$EF,$EE,$ED,$EB,$EA,$EA,$EB,$ED,$EE,$F0,$F0,$EF,$EC,$EA,$E9,$E9,$EB,$ED,$EF,$F1,$F1,$EF,$EC,$E9,$E7,$E8,$EA,$EE,$F2,$F3,$F3,$EF,$EA,$E5,$E3,$E4,$EA,$F3,$FB,$FF,$FA,$EB,$CF,$AA,$80,$55,$30,$14,$05,$00,$04,$0C,$15,$1B,$1C,$1A,$15,$10,$0C,$0C,$0D,$11,$15,$17,$18,$16,$13,$10,$0E,$0E,$10,$12,$14,$16,$16,$15,$13,$10,$0F,$0F,$11,$12,$14,$15,$15,$14,$12,$11,$10,$10,$11,$13,$14,$15,$15,$14,$12,$11,$10,$10,$11,$13,$14,$15,$15,$13,$12,$10,$10,$10,$12,$13,$15,$15,$14,$13,$11,$10,$10,$11,$12,$14,$15,$15,$14,$13,$11,$10,$10,$11,$12,$14,$15,$15,$14,$12,$11,$0F,$0F,$10,$13,$15,$16,$16,$14,$12,$10,$0E,$0E,$10,$13,$16,$18,$17,$15,$11,$0D,$0C,$0C,$10,$15,$1A,$1C,$1B,$15,$0C,$04,$00,$05,$14,$30,$55,$7F
-SQ_LIMIT11: .db $A1,$BF,$D9,$ED,$F9,$FF,$FF,$FA,$F4,$ED,$E7,$E3,$E2,$E4,$E7,$EC,$F0,$F3,$F4,$F3,$F1,$EE,$EB,$E9,$E7,$E7,$E8,$EA,$ED,$EF,$F1,$F1,$F1,$EF,$ED,$EB,$E9,$E9,$E9,$EA,$EB,$ED,$EF,$F0,$F0,$F0,$EE,$ED,$EB,$EA,$E9,$E9,$EA,$EC,$EE,$EF,$F0,$F0,$EF,$EE,$EC,$EB,$EA,$E9,$EA,$EB,$EC,$EE,$EF,$F0,$F0,$EF,$EE,$EC,$EA,$E9,$E9,$EA,$EB,$ED,$EE,$F0,$F0,$F0,$EF,$ED,$EB,$EA,$E9,$E9,$E9,$EB,$ED,$EF,$F1,$F1,$F1,$EF,$ED,$EA,$E8,$E7,$E7,$E9,$EB,$EE,$F1,$F3,$F4,$F3,$F0,$EC,$E7,$E4,$E2,$E3,$E7,$ED,$F4,$FA,$FF,$FF,$F9,$ED,$D9,$BF,$A1,$80,$5E,$40,$26,$12,$06,$00,$00,$05,$0B,$12,$18,$1C,$1D,$1B,$18,$13,$0F,$0C,$0B,$0C,$0E,$11,$14,$16,$18,$18,$17,$15,$12,$10,$0E,$0E,$0E,$10,$12,$14,$16,$16,$16,$15,$14,$12,$10,$0F,$0F,$0F,$11,$12,$14,$15,$16,$16,$15,$13,$11,$10,$0F,$0F,$10,$11,$13,$14,$15,$16,$15,$14,$13,$11,$10,$0F,$0F,$10,$11,$13,$15,$16,$16,$15,$14,$12,$11,$0F,$0F,$0F,$10,$12,$14,$15,$16,$16,$16,$14,$12,$10,$0E,$0E,$0E,$10,$12,$15,$17,$18,$18,$16,$14,$11,$0E,$0C,$0B,$0C,$0F,$13,$18,$1B,$1D,$1C,$18,$12,$0B,$05,$00,$00,$06,$12,$26,$40,$5E,$7F
-SQ_LIMIT12: .db $9A,$B4,$CA,$DE,$ED,$F7,$FD,$FF,$FE,$FA,$F4,$EF,$E9,$E5,$E2,$E1,$E2,$E4,$E7,$EB,$EE,$F1,$F3,$F3,$F3,$F1,$EF,$EC,$EA,$E8,$E6,$E6,$E6,$E8,$E9,$EC,$EE,$EF,$F1,$F1,$F1,$EF,$EE,$EC,$EA,$E9,$E8,$E7,$E8,$E9,$EA,$EC,$ED,$EF,$F0,$F0,$F0,$EF,$EE,$EC,$EA,$E9,$E8,$E8,$E8,$E9,$EA,$EC,$EE,$EF,$F0,$F0,$F0,$EF,$ED,$EC,$EA,$E9,$E8,$E7,$E8,$E9,$EA,$EC,$EE,$EF,$F1,$F1,$F1,$EF,$EE,$EC,$E9,$E8,$E6,$E6,$E6,$E8,$EA,$EC,$EF,$F1,$F3,$F3,$F3,$F1,$EE,$EB,$E7,$E4,$E2,$E1,$E2,$E5,$E9,$EF,$F4,$FA,$FE,$FF,$FD,$F7,$ED,$DE,$CA,$B4,$9A,$80,$65,$4B,$35,$21,$12,$08,$02,$00,$01,$05,$0B,$10,$16,$1A,$1D,$1E,$1D,$1B,$18,$14,$11,$0E,$0C,$0C,$0C,$0E,$10,$13,$15,$17,$19,$19,$19,$17,$16,$13,$11,$10,$0E,$0E,$0E,$10,$11,$13,$15,$16,$17,$18,$17,$16,$15,$13,$12,$10,$0F,$0F,$0F,$10,$11,$13,$15,$16,$17,$17,$17,$16,$15,$13,$11,$10,$0F,$0F,$0F,$10,$12,$13,$15,$16,$17,$18,$17,$16,$15,$13,$11,$10,$0E,$0E,$0E,$10,$11,$13,$16,$17,$19,$19,$19,$17,$15,$13,$10,$0E,$0C,$0C,$0C,$0E,$11,$14,$18,$1B,$1D,$1E,$1D,$1A,$16,$10,$0B,$05,$01,$00,$02,$08,$12,$21,$35,$4B,$65,$7F
-SQ_LIMIT13: .db $97,$AD,$C2,$D5,$E4,$F0,$F8,$FD,$FF,$FE,$FB,$F7,$F2,$ED,$E8,$E5,$E2,$E1,$E1,$E3,$E5,$E8,$EB,$EE,$F1,$F2,$F3,$F3,$F2,$F1,$EF,$EC,$EA,$E8,$E7,$E6,$E6,$E6,$E8,$E9,$EB,$ED,$EF,$F0,$F1,$F1,$F1,$F0,$EE,$EC,$EB,$E9,$E8,$E7,$E7,$E7,$E8,$E9,$EB,$ED,$EE,$EF,$F0,$F1,$F0,$EF,$EE,$ED,$EB,$E9,$E8,$E7,$E7,$E7,$E8,$E9,$EB,$EC,$EE,$F0,$F1,$F1,$F1,$F0,$EF,$ED,$EB,$E9,$E8,$E6,$E6,$E6,$E7,$E8,$EA,$EC,$EF,$F1,$F2,$F3,$F3,$F2,$F1,$EE,$EB,$E8,$E5,$E3,$E1,$E1,$E2,$E5,$E8,$ED,$F2,$F7,$FB,$FE,$FF,$FD,$F8,$F0,$E4,$D5,$C2,$AD,$97,$80,$68,$52,$3D,$2A,$1B,$0F,$07,$02,$00,$01,$04,$08,$0D,$12,$17,$1A,$1D,$1E,$1E,$1C,$1A,$17,$14,$11,$0E,$0D,$0C,$0C,$0D,$0E,$10,$13,$15,$17,$18,$19,$19,$19,$17,$16,$14,$12,$10,$0F,$0E,$0E,$0E,$0F,$11,$13,$14,$16,$17,$18,$18,$18,$17,$16,$14,$12,$11,$10,$0F,$0E,$0F,$10,$11,$12,$14,$16,$17,$18,$18,$18,$17,$16,$14,$13,$11,$0F,$0E,$0E,$0E,$0F,$10,$12,$14,$16,$17,$19,$19,$19,$18,$17,$15,$13,$10,$0E,$0D,$0C,$0C,$0D,$0E,$11,$14,$17,$1A,$1C,$1E,$1E,$1D,$1A,$17,$12,$0D,$08,$04,$01,$00,$02,$07,$0F,$1B,$2A,$3D,$52,$68,$7F
-SQ_LIMIT14: .db $90,$A1,$B1,$BF,$CD,$D9,$E4,$ED,$F4,$F9,$FD,$FF,$FF,$FE,$FC,$F9,$F6,$F2,$EF,$EB,$E8,$E5,$E3,$E1,$E0,$E0,$E1,$E2,$E4,$E6,$E8,$EB,$ED,$EF,$F1,$F2,$F3,$F4,$F4,$F3,$F2,$F1,$EF,$ED,$EB,$EA,$E8,$E7,$E5,$E5,$E4,$E5,$E5,$E6,$E7,$E9,$EA,$EC,$EE,$EF,$F0,$F1,$F2,$F2,$F2,$F1,$F0,$EF,$EE,$EC,$EA,$E9,$E7,$E6,$E5,$E5,$E4,$E5,$E5,$E7,$E8,$EA,$EB,$ED,$EF,$F1,$F2,$F3,$F4,$F4,$F3,$F2,$F1,$EF,$ED,$EB,$E8,$E6,$E4,$E2,$E1,$E0,$E0,$E1,$E3,$E5,$E8,$EB,$EF,$F2,$F6,$F9,$FC,$FE,$FF,$FF,$FD,$F9,$F4,$ED,$E4,$D9,$CD,$BF,$B1,$A1,$90,$80,$6F,$5E,$4E,$40,$32,$26,$1B,$12,$0B,$06,$02,$00,$00,$01,$03,$06,$09,$0D,$10,$14,$17,$1A,$1C,$1E,$1F,$1F,$1E,$1D,$1B,$19,$17,$14,$12,$10,$0E,$0D,$0C,$0B,$0B,$0C,$0D,$0E,$10,$12,$14,$15,$17,$18,$1A,$1A,$1B,$1A,$1A,$19,$18,$16,$15,$13,$11,$10,$0F,$0E,$0D,$0D,$0D,$0E,$0F,$10,$11,$13,$15,$16,$18,$19,$1A,$1A,$1B,$1A,$1A,$18,$17,$15,$14,$12,$10,$0E,$0D,$0C,$0B,$0B,$0C,$0D,$0E,$10,$12,$14,$17,$19,$1B,$1D,$1E,$1F,$1F,$1E,$1C,$1A,$17,$14,$10,$0D,$09,$06,$03,$01,$00,$00,$02,$06,$0B,$12,$1B,$26,$32,$40,$4E,$5E,$6F,$7F
-SQ_LIMIT15: .db $8D,$9A,$A7,$B4,$BF,$CA,$D4,$DE,$E6,$ED,$F2,$F7,$FB,$FD,$FF,$FF,$FF,$FD,$FC,$F9,$F7,$F4,$F1,$EE,$EB,$E8,$E6,$E3,$E2,$E1,$E0,$E0,$E0,$E1,$E2,$E3,$E5,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F3,$F4,$F4,$F4,$F4,$F4,$F3,$F2,$F0,$EF,$ED,$EB,$EA,$E8,$E7,$E5,$E4,$E3,$E3,$E3,$E3,$E3,$E4,$E5,$E7,$E8,$EA,$EB,$ED,$EF,$F0,$F2,$F3,$F4,$F4,$F4,$F4,$F4,$F3,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E5,$E3,$E2,$E1,$E0,$E0,$E0,$E1,$E2,$E3,$E6,$E8,$EB,$EE,$F1,$F4,$F7,$F9,$FC,$FD,$FF,$FF,$FF,$FD,$FB,$F7,$F2,$ED,$E6,$DE,$D4,$CA,$BF,$B4,$A7,$9A,$8D,$80,$72,$65,$58,$4B,$40,$35,$2B,$21,$19,$12,$0D,$08,$04,$02,$00,$00,$00,$02,$03,$06,$08,$0B,$0E,$11,$14,$17,$19,$1C,$1D,$1E,$1F,$1F,$1F,$1E,$1D,$1C,$1A,$19,$17,$15,$13,$11,$0F,$0D,$0C,$0B,$0B,$0B,$0B,$0B,$0C,$0D,$0F,$10,$12,$14,$15,$17,$18,$1A,$1B,$1C,$1C,$1C,$1C,$1C,$1B,$1A,$18,$17,$15,$14,$12,$10,$0F,$0D,$0C,$0B,$0B,$0B,$0B,$0B,$0C,$0D,$0F,$11,$13,$15,$17,$19,$1A,$1C,$1D,$1E,$1F,$1F,$1F,$1E,$1D,$1C,$19,$17,$14,$11,$0E,$0B,$08,$06,$03,$02,$00,$00,$00,$02,$04,$08,$0D,$12,$19,$21,$2B,$35,$40,$4B,$58,$65,$72,$7F
+INV_SAW1:
+	; base freqency: 41.20 Hz, discrets: 442, rms: 7.95, min: -0.88, max: 0.88
 
-;*** Bandlimited triangle wavetables
-TRI_LIMIT0: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT1: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT2: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT3: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT4: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT5: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT6: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT7: .db $81,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$81,$80,$7E,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$05,$03,$01,$00,$01,$03,$05,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7E,$80
-TRI_LIMIT8: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EA,$EC,$EE,$F0,$F2,$F4,$F6,$F8,$FB,$FD,$FE,$FF,$FE,$FD,$FB,$F8,$F6,$F4,$F2,$F0,$EE,$EC,$EA,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$15,$13,$11,$0F,$0D,$0B,$09,$07,$04,$02,$01,$00,$01,$02,$04,$07,$09,$0B,$0D,$0F,$11,$13,$15,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT9: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E4,$E6,$E8,$EB,$ED,$EF,$F1,$F2,$F4,$F6,$F9,$FB,$FD,$FE,$FF,$FE,$FD,$FB,$F9,$F6,$F4,$F2,$F1,$EF,$ED,$EB,$E8,$E6,$E4,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1B,$19,$17,$14,$12,$10,$0E,$0D,$0B,$09,$06,$04,$02,$01,$00,$01,$02,$04,$06,$09,$0B,$0D,$0E,$10,$12,$14,$17,$19,$1B,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT10: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BE,$C0,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D1,$D3,$D5,$D7,$D9,$DB,$DD,$DF,$E1,$E3,$E5,$E7,$E9,$EB,$ED,$EF,$F1,$F3,$F5,$F7,$FA,$FC,$FD,$FF,$FF,$FF,$FD,$FC,$FA,$F7,$F5,$F3,$F1,$EF,$ED,$EB,$E9,$E7,$E5,$E3,$E1,$DF,$DD,$DB,$D9,$D7,$D5,$D3,$D1,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C0,$BE,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$41,$3F,$3D,$3B,$39,$37,$35,$33,$31,$2E,$2C,$2A,$28,$26,$24,$22,$20,$1E,$1C,$1A,$18,$16,$14,$12,$10,$0E,$0C,$0A,$08,$05,$03,$02,$00,$00,$00,$02,$03,$05,$08,$0A,$0C,$0E,$10,$12,$14,$16,$18,$1A,$1C,$1E,$20,$22,$24,$26,$28,$2A,$2C,$2E,$31,$33,$35,$37,$39,$3B,$3D,$3F,$41,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT11: .db $81,$83,$85,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B0,$B2,$B4,$B6,$B8,$BA,$BC,$BF,$C1,$C3,$C5,$C7,$C9,$CB,$CD,$CF,$D1,$D3,$D5,$D7,$D9,$DB,$DD,$DF,$E1,$E3,$E5,$E7,$E9,$EB,$ED,$EF,$F1,$F4,$F6,$F8,$FA,$FC,$FE,$FF,$FF,$FF,$FE,$FC,$FA,$F8,$F6,$F4,$F1,$EF,$ED,$EB,$E9,$E7,$E5,$E3,$E1,$DF,$DD,$DB,$D9,$D7,$D5,$D3,$D1,$CF,$CD,$CB,$C9,$C7,$C5,$C3,$C1,$BF,$BC,$BA,$B8,$B6,$B4,$B2,$B0,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$85,$83,$81,$80,$7E,$7C,$7A,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4F,$4D,$4B,$49,$47,$45,$43,$40,$3E,$3C,$3A,$38,$36,$34,$32,$30,$2E,$2C,$2A,$28,$26,$24,$22,$20,$1E,$1C,$1A,$18,$16,$14,$12,$10,$0E,$0B,$09,$07,$05,$03,$01,$00,$00,$00,$01,$03,$05,$07,$09,$0B,$0E,$10,$12,$14,$16,$18,$1A,$1C,$1E,$20,$22,$24,$26,$28,$2A,$2C,$2E,$30,$32,$34,$36,$38,$3A,$3C,$3E,$40,$43,$45,$47,$49,$4B,$4D,$4F,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$7A,$7C,$7E,$80
-TRI_LIMIT12: .db $81,$83,$85,$87,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AA,$AC,$AE,$B1,$B3,$B5,$B7,$B9,$BB,$BD,$BF,$C1,$C3,$C5,$C7,$C9,$CB,$CD,$CF,$D1,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E2,$E3,$E5,$E7,$E9,$EB,$EE,$F0,$F2,$F5,$F7,$F9,$FB,$FD,$FE,$FF,$FF,$FF,$FE,$FD,$FB,$F9,$F7,$F5,$F2,$F0,$EE,$EB,$E9,$E7,$E5,$E3,$E2,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D1,$CF,$CD,$CB,$C9,$C7,$C5,$C3,$C1,$BF,$BD,$BB,$B9,$B7,$B5,$B3,$B1,$AE,$AC,$AA,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$87,$85,$83,$81,$80,$7E,$7C,$7A,$78,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$55,$53,$51,$4E,$4C,$4A,$48,$46,$44,$42,$40,$3E,$3C,$3A,$38,$36,$34,$32,$30,$2E,$2B,$29,$27,$25,$23,$21,$1F,$1D,$1C,$1A,$18,$16,$14,$11,$0F,$0D,$0A,$08,$06,$04,$02,$01,$00,$00,$00,$01,$02,$04,$06,$08,$0A,$0D,$0F,$11,$14,$16,$18,$1A,$1C,$1D,$1F,$21,$23,$25,$27,$29,$2B,$2E,$30,$32,$34,$36,$38,$3A,$3C,$3E,$40,$42,$44,$46,$48,$4A,$4C,$4E,$51,$53,$55,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$78,$7A,$7C,$7E,$80
-TRI_LIMIT13: .db $82,$84,$86,$88,$8A,$8C,$8E,$90,$92,$94,$96,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A7,$A9,$AB,$AD,$AF,$B1,$B3,$B5,$B7,$B9,$BB,$BD,$BF,$C1,$C3,$C5,$C7,$C9,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E1,$E3,$E5,$E8,$EA,$EC,$EE,$F1,$F3,$F6,$F8,$FA,$FC,$FD,$FE,$FF,$FF,$FF,$FE,$FD,$FC,$FA,$F8,$F6,$F3,$F1,$EE,$EC,$EA,$E8,$E5,$E3,$E1,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$C9,$C7,$C5,$C3,$C1,$BF,$BD,$BB,$B9,$B7,$B5,$B3,$B1,$AF,$AD,$AB,$A9,$A7,$A4,$A2,$A0,$9E,$9C,$9A,$98,$96,$94,$92,$90,$8E,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$71,$6F,$6D,$6B,$69,$67,$65,$63,$61,$5F,$5D,$5B,$58,$56,$54,$52,$50,$4E,$4C,$4A,$48,$46,$44,$42,$40,$3E,$3C,$3A,$38,$36,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1E,$1C,$1A,$17,$15,$13,$11,$0E,$0C,$09,$07,$05,$03,$02,$01,$00,$00,$00,$01,$02,$03,$05,$07,$09,$0C,$0E,$11,$13,$15,$17,$1A,$1C,$1E,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$36,$38,$3A,$3C,$3E,$40,$42,$44,$46,$48,$4A,$4C,$4E,$50,$52,$54,$56,$58,$5B,$5D,$5F,$61,$63,$65,$67,$69,$6B,$6D,$6F,$71,$73,$75,$77,$79,$7B,$7D,$80
-TRI_LIMIT14: .db $82,$84,$86,$88,$8A,$8C,$8F,$91,$93,$95,$97,$98,$9A,$9C,$9E,$A0,$A2,$A4,$A6,$A8,$AB,$AD,$AF,$B1,$B3,$B6,$B8,$BA,$BC,$BE,$C1,$C3,$C5,$C7,$C9,$CB,$CC,$CE,$D0,$D2,$D4,$D6,$D8,$DA,$DC,$DE,$E0,$E3,$E5,$E7,$EA,$EC,$EF,$F1,$F3,$F6,$F8,$FA,$FB,$FC,$FE,$FE,$FF,$FF,$FF,$FE,$FE,$FC,$FB,$FA,$F8,$F6,$F3,$F1,$EF,$EC,$EA,$E7,$E5,$E3,$E0,$DE,$DC,$DA,$D8,$D6,$D4,$D2,$D0,$CE,$CC,$CB,$C9,$C7,$C5,$C3,$C1,$BE,$BC,$BA,$B8,$B6,$B3,$B1,$AF,$AD,$AB,$A8,$A6,$A4,$A2,$A0,$9E,$9C,$9A,$98,$97,$95,$93,$91,$8F,$8C,$8A,$88,$86,$84,$82,$80,$7D,$7B,$79,$77,$75,$73,$70,$6E,$6C,$6A,$68,$67,$65,$63,$61,$5F,$5D,$5B,$59,$57,$54,$52,$50,$4E,$4C,$49,$47,$45,$43,$41,$3E,$3C,$3A,$38,$36,$34,$33,$31,$2F,$2D,$2B,$29,$27,$25,$23,$21,$1F,$1C,$1A,$18,$15,$13,$10,$0E,$0C,$09,$07,$05,$04,$03,$01,$01,$00,$00,$00,$01,$01,$03,$04,$05,$07,$09,$0C,$0E,$10,$13,$15,$18,$1A,$1C,$1F,$21,$23,$25,$27,$29,$2B,$2D,$2F,$31,$33,$34,$36,$38,$3A,$3C,$3E,$41,$43,$45,$47,$49,$4C,$4E,$50,$52,$54,$57,$59,$5B,$5D,$5F,$61,$63,$65,$67,$68,$6A,$6C,$6E,$70,$73,$75,$77,$79,$7B,$7D,$7F
-TRI_LIMIT15: .db $81,$83,$85,$87,$89,$8B,$8D,$8F,$92,$94,$96,$98,$9A,$9D,$9F,$A1,$A3,$A6,$A8,$AA,$AC,$AF,$B1,$B3,$B5,$B7,$B9,$BB,$BD,$BF,$C1,$C2,$C4,$C6,$C8,$CA,$CC,$CE,$D0,$D2,$D4,$D7,$D9,$DB,$DE,$E0,$E2,$E5,$E7,$EA,$EC,$EF,$F1,$F3,$F5,$F7,$F9,$FA,$FC,$FD,$FE,$FE,$FF,$FF,$FF,$FE,$FE,$FD,$FC,$FA,$F9,$F7,$F5,$F3,$F1,$EF,$EC,$EA,$E7,$E5,$E2,$E0,$DE,$DB,$D9,$D7,$D4,$D2,$D0,$CE,$CC,$CA,$C8,$C6,$C4,$C2,$C1,$BF,$BD,$BB,$B9,$B7,$B5,$B3,$B1,$AF,$AC,$AA,$A8,$A6,$A3,$A1,$9F,$9D,$9A,$98,$96,$94,$92,$8F,$8D,$8B,$89,$87,$85,$83,$81,$80,$7E,$7C,$7A,$78,$76,$74,$72,$70,$6D,$6B,$69,$67,$65,$62,$60,$5E,$5C,$59,$57,$55,$53,$50,$4E,$4C,$4A,$48,$46,$44,$42,$40,$3E,$3D,$3B,$39,$37,$35,$33,$31,$2F,$2D,$2B,$28,$26,$24,$21,$1F,$1D,$1A,$18,$15,$13,$10,$0E,$0C,$0A,$08,$06,$05,$03,$02,$01,$01,$00,$00,$00,$01,$01,$02,$03,$05,$06,$08,$0A,$0C,$0E,$10,$13,$15,$18,$1A,$1D,$1F,$21,$24,$26,$28,$2B,$2D,$2F,$31,$33,$35,$37,$39,$3B,$3D,$3E,$40,$42,$44,$46,$48,$4A,$4C,$4E,$50,$53,$55,$57,$59,$5C,$5E,$60,$62,$65,$67,$69,$6B,$6D,$70,$72,$74,$76,$78,$7A,$7C,$7E,$7F
+	.db	  128,   17,   16,   21,    23,   21,   22,   25
+	.db	   25,   25,   26,   28,    28,   29,   30,   31
+	.db	   31,   32,   34,   34,    35,   36,   37,   38
+	.db	   38,   39,   40,   41,    42,   43,   44,   44
+
+	.db	   45,   46,   47,   48,    49,   50,   51,   51
+	.db	   52,   53,   54,   55,    56,   57,   57,   58
+	.db	   59,   60,   61,   62,    63,   64,   64,   65
+	.db	   66,   67,   68,   69,    70,   70,   71,   72
+
+	.db	   73,   74,   75,   76,    76,   77,   78,   79
+	.db	   80,   81,   82,   83,    83,   84,   85,   86
+	.db	   87,   88,   89,   89,    90,   91,   92,   93
+	.db	   94,   95,   96,   96,    97,   98,   99,  100
+
+	.db	  101,  102,  102,  103,   104,  105,  106,  107
+	.db	  108,  109,  109,  110,   111,  112,  113,  114
+	.db	  115,  115,  116,  117,   118,  119,  120,  121
+	.db	  122,  122,  123,  124,   125,  126,  127,  128
+
+	.db	  128,  128,  129,  130,   131,  132,  133,  134
+	.db	  134,  135,  136,  137,   138,  139,  140,  141
+	.db	  141,  142,  143,  144,   145,  146,  147,  147
+	.db	  148,  149,  150,  151,   152,  153,  154,  154
+
+	.db	  155,  156,  157,  158,   159,  160,  160,  161
+	.db	  162,  163,  164,  165,   166,  167,  167,  168
+	.db	  169,  170,  171,  172,   173,  173,  174,  175
+	.db	  176,  177,  178,  179,   180,  180,  181,  182
+
+	.db	  183,  184,  185,  186,   186,  187,  188,  189
+	.db	  190,  191,  192,  192,   193,  194,  195,  196
+	.db	  197,  198,  199,  199,   200,  201,  202,  203
+	.db	  204,  205,  205,  206,   207,  208,  209,  210
+
+	.db	  211,  212,  212,  213,   214,  215,  216,  217
+	.db	  218,  218,  219,  220,   221,  222,  222,  224
+	.db	  225,  225,  226,  227,   228,  228,  230,  231
+	.db	  231,  231,  234,  235,   233,  235,  240,  239
+
+
+INV_SAW2:
+	; base freqency: 65.41 Hz, discrets: 278, rms: 7.95, min: -0.85, max: 0.85
+
+	.db	  128,   28,   22,   20,    20,   20,   21,   22
+	.db	   24,   26,   27,   28,    29,   29,   30,   30
+	.db	   31,   32,   33,   34,    35,   36,   37,   38
+	.db	   39,   39,   40,   41,    41,   42,   43,   44
+
+	.db	   45,   46,   47,   48,    49,   50,   50,   51
+	.db	   52,   53,   54,   55,    56,   57,   58,   58
+	.db	   59,   60,   61,   62,    62,   63,   64,   65
+	.db	   66,   67,   68,   69,    70,   70,   71,   72
+
+	.db	   73,   74,   75,   76,    77,   77,   78,   79
+	.db	   80,   81,   82,   82,    83,   84,   85,   86
+	.db	   87,   88,   89,   89,    90,   91,   92,   93
+	.db	   94,   95,   96,   97,    97,   98,   99,  100
+
+	.db	  101,  101,  102,  103,   104,  105,  106,  107
+	.db	  108,  109,  109,  110,   111,  112,  113,  114
+	.db	  115,  116,  116,  117,   118,  119,  120,  121
+	.db	  121,  122,  123,  124,   125,  126,  127,  128
+
+	.db	  128,  128,  129,  130,   131,  132,  133,  134
+	.db	  135,  135,  136,  137,   138,  139,  140,  140
+	.db	  141,  142,  143,  144,   145,  146,  147,  147
+	.db	  148,  149,  150,  151,   152,  153,  154,  155
+
+	.db	  155,  156,  157,  158,   159,  159,  160,  161
+	.db	  162,  163,  164,  165,   166,  167,  167,  168
+	.db	  169,  170,  171,  172,   173,  174,  174,  175
+	.db	  176,  177,  178,  179,   179,  180,  181,  182
+
+	.db	  183,  184,  185,  186,   186,  187,  188,  189
+	.db	  190,  191,  192,  193,   194,  194,  195,  196
+	.db	  197,  198,  198,  199,   200,  201,  202,  203
+	.db	  204,  205,  206,  206,   207,  208,  209,  210
+
+	.db	  211,  212,  213,  214,   215,  215,  216,  217
+	.db	  217,  218,  219,  220,   221,  222,  223,  224
+	.db	  225,  226,  226,  227,   227,  228,  229,  230
+	.db	  232,  234,  235,  236,   236,  236,  234,  228
+
+
+INV_SAW3:
+	; base freqency: 103.83 Hz, discrets: 176, rms: 7.95, min: -0.92, max: 0.92
+
+	.db	  128,   10,   15,   26,    21,   19,   25,   25
+	.db	   23,   26,   28,   26,    28,   30,   29,   30
+	.db	   33,   32,   33,   35,    35,   35,   37,   38
+	.db	   38,   40,   41,   41,    42,   44,   44,   44
+
+	.db	   46,   46,   47,   48,    49,   49,   51,   52
+	.db	   52,   53,   55,   55,    56,   57,   58,   58
+	.db	   60,   60,   61,   62,    63,   63,   65,   66
+	.db	   66,   67,   68,   69,    70,   71,   71,   72
+
+	.db	   73,   74,   75,   76,    77,   77,   78,   80
+	.db	   80,   81,   82,   83,    83,   85,   85,   86
+	.db	   87,   88,   89,   90,    91,   91,   92,   93
+	.db	   94,   95,   96,   97,    97,   98,   99,  100
+
+	.db	  101,  102,  102,  103,   105,  105,  106,  107
+	.db	  108,  108,  110,  110,   111,  112,  113,  114
+	.db	  115,  116,  116,  117,   118,  119,  120,  121
+	.db	  122,  122,  123,  124,   125,  126,  127,  127
+
+	.db	  128,  129,  129,  130,   131,  132,  133,  134
+	.db	  134,  135,  136,  137,   138,  139,  140,  140
+	.db	  141,  142,  143,  144,   145,  146,  146,  148
+	.db	  148,  149,  150,  151,   151,  153,  154,  154
+
+	.db	  155,  156,  157,  158,   159,  159,  160,  161
+	.db	  162,  163,  164,  165,   165,  166,  167,  168
+	.db	  169,  170,  171,  171,   173,  173,  174,  175
+	.db	  176,  176,  178,  179,   179,  180,  181,  182
+
+	.db	  183,  184,  185,  185,   186,  187,  188,  189
+	.db	  190,  190,  191,  193,   193,  194,  195,  196
+	.db	  196,  198,  198,  199,   200,  201,  201,  203
+	.db	  204,  204,  205,  207,   207,  208,  209,  210
+
+	.db	  210,  212,  212,  212,   214,  215,  215,  216
+	.db	  218,  218,  219,  221,   221,  221,  223,  224
+	.db	  223,  226,  227,  226,   228,  230,  228,  230
+	.db	  233,  231,  231,  237,   235,  230,  241,  246
+
+
+INV_SAW4:
+	; base freqency: 164.81 Hz, discrets: 111, rms: 7.95, min: -1.00, max: 1.00
+
+	.db	  128,    1,   27,   19,    21,   25,   20,   28
+	.db	   22,   28,   25,   28,    29,   28,   32,   29
+	.db	   33,   31,   34,   34,    35,   37,   36,   39
+	.db	   38,   40,   40,   41,    43,   42,   45,   44
+
+	.db	   46,   46,   48,   48,    49,   50,   50,   52
+	.db	   52,   54,   54,   55,    56,   56,   58,   58
+	.db	   60,   60,   61,   62,    63,   64,   64,   66
+	.db	   66,   67,   68,   69,    70,   70,   72,   72
+
+	.db	   74,   74,   75,   76,    76,   78,   78,   80
+	.db	   80,   81,   82,   83,    84,   84,   86,   86
+	.db	   87,   88,   89,   90,    90,   92,   92,   93
+	.db	   94,   95,   96,   96,    98,   98,   99,  100
+
+	.db	  101,  102,  102,  104,   104,  106,  106,  107
+	.db	  108,  109,  110,  110,   112,  112,  113,  114
+	.db	  115,  116,  116,  118,   118,  119,  120,  121
+	.db	  122,  122,  124,  124,   125,  126,  127,  128
+
+	.db	  128,  128,  129,  130,   131,  132,  132,  134
+	.db	  134,  135,  136,  137,   138,  138,  140,  140
+	.db	  141,  142,  143,  144,   144,  146,  146,  147
+	.db	  148,  149,  150,  150,   152,  152,  154,  154
+
+	.db	  155,  156,  157,  158,   158,  160,  160,  161
+	.db	  162,  163,  164,  164,   166,  166,  167,  168
+	.db	  169,  170,  170,  172,   172,  173,  174,  175
+	.db	  176,  176,  178,  178,   180,  180,  181,  182
+
+	.db	  182,  184,  184,  186,   186,  187,  188,  189
+	.db	  190,  190,  192,  192,   193,  194,  195,  196
+	.db	  196,  198,  198,  200,   200,  201,  202,  202
+	.db	  204,  204,  206,  206,   207,  208,  208,  210
+
+	.db	  210,  212,  211,  214,   213,  215,  216,  216
+	.db	  218,  217,  220,  219,   221,  222,  222,  225
+	.db	  223,  227,  224,  228,   227,  228,  231,  228
+	.db	  234,  228,  236,  231,   235,  237,  229,  255
+
+
+INV_SAW5:
+	; base freqency: 261.62 Hz, discrets: 70, rms: 7.95, min: -1.00, max: 1.00
+
+	.db	  128,   26,    1,   24,    30,   17,   19,   29
+	.db	   27,   21,   26,   31,    27,   26,   32,   33
+	.db	   30,   31,   36,   35,    33,   36,   39,   37
+	.db	   37,   41,   41,   40,    42,   44,   44,   43
+
+	.db	   46,   47,   46,   47,    50,   50,   50,   51
+	.db	   53,   53,   53,   56,    57,   56,   57,   59
+	.db	   60,   59,   61,   63,    62,   63,   65,   66
+	.db	   66,   67,   69,   69,    69,   71,   72,   72
+
+	.db	   73,   75,   75,   75,    77,   78,   78,   79
+	.db	   80,   81,   81,   82,    84,   85,   85,   86
+	.db	   88,   88,   88,   90,    91,   91,   92,   94
+	.db	   94,   94,   96,   97,    97,   98,  100,  100
+
+	.db	  100,  102,  103,  103,   104,  105,  106,  107
+	.db	  107,  109,  110,  110,   111,  113,  113,  113
+	.db	  115,  116,  116,  117,   119,  119,  119,  121
+	.db	  122,  122,  123,  125,   125,  125,  127,  128
+
+	.db	  128,  128,  129,  131,   131,  131,  133,  134
+	.db	  134,  135,  137,  137,   137,  139,  140,  140
+	.db	  141,  143,  143,  143,   145,  146,  146,  147
+	.db	  149,  149,  150,  151,   152,  153,  153,  154
+
+	.db	  156,  156,  156,  158,   159,  159,  160,  162
+	.db	  162,  162,  164,  165,   165,  166,  168,  168
+	.db	  168,  170,  171,  171,   172,  174,  175,  175
+	.db	  176,  177,  178,  178,   179,  181,  181,  181
+
+	.db	  183,  184,  184,  185,   187,  187,  187,  189
+	.db	  190,  190,  191,  193,   194,  193,  195,  197
+	.db	  196,  197,  199,  200,   199,  200,  203,  203
+	.db	  203,  205,  206,  206,   206,  209,  210,  209
+
+	.db	  210,  213,  212,  212,   214,  216,  215,  215
+	.db	  219,  219,  217,  220,   223,  221,  220,  225
+	.db	  226,  223,  224,  230,   229,  225,  230,  235
+	.db	  229,  227,  237,  239,   226,  232,  255,  230
+
+
+INV_SAW6:
+	; base freqency: 415.30 Hz, discrets: 44, rms: 7.95, min: -1.00, max: 1.00
+
+	.db	  128,   57,   11,    0,    13,   29,   33,   27
+	.db	   19,   19,   25,   32,    33,   29,   26,   27
+	.db	   32,   36,   36,   33,    32,   34,   38,   40
+	.db	   40,   38,   38,   40,    43,   45,   44,   43
+
+	.db	   43,   46,   49,   50,    49,   48,   49,   52
+	.db	   54,   54,   53,   53,    55,   57,   59,   59
+	.db	   58,   59,   60,   63,    64,   64,   63,   64
+	.db	   66,   68,   69,   69,    69,   69,   71,   73
+
+	.db	   74,   74,   74,   75,    77,   78,   79,   79
+	.db	   79,   80,   82,   84,    84,   84,   84,   86
+	.db	   88,   89,   89,   89,    90,   91,   93,   94
+	.db	   94,   94,   95,   97,    98,   99,   99,   99
+
+	.db	  100,  102,  103,  104,   104,  104,  106,  108
+	.db	  108,  109,  109,  110,   111,  113,  113,  114
+	.db	  114,  115,  117,  118,   119,  119,  119,  120
+	.db	  122,  123,  124,  124,   124,  126,  127,  128
+
+	.db	  128,  128,  129,  130,   132,  132,  132,  133
+	.db	  134,  136,  137,  137,   137,  138,  139,  141
+	.db	  142,  142,  143,  143,   145,  146,  147,  147
+	.db	  148,  148,  150,  152,   152,  152,  153,  154
+
+	.db	  156,  157,  157,  157,   158,  159,  161,  162
+	.db	  162,  162,  163,  165,   166,  167,  167,  167
+	.db	  168,  170,  172,  172,   172,  172,  174,  176
+	.db	  177,  177,  177,  178,   179,  181,  182,  182
+
+	.db	  182,  183,  185,  187,   187,  187,  187,  188
+	.db	  190,  192,  193,  192,   192,  193,  196,  197
+	.db	  198,  197,  197,  199,   201,  203,  203,  202
+	.db	  202,  204,  207,  208,   207,  206,  207,  210
+
+	.db	  213,  213,  212,  211,   213,  216,  218,  218
+	.db	  216,  216,  218,  222,   224,  223,  220,  220
+	.db	  224,  229,  230,  227,   223,  224,  231,  237
+	.db	  237,  229,  223,  227,   243,  255,  245,  199
+
+
+INV_SAW7:
+	; base freqency: 659.25 Hz, discrets: 28, rms: 7.95, min: -0.99, max: 0.99
+
+	.db	  128,   81,   41,   14,     2,    3,   12,   23
+	.db	   32,   36,   34,   29,    24,   21,   22,   26
+	.db	   32,   36,   38,   38,    36,   33,   32,   33
+	.db	   36,   40,   43,   44,    44,   43,   42,   41
+
+	.db	   42,   44,   47,   50,    51,   51,   51,   50
+	.db	   49,   50,   52,   55,    57,   59,   59,   58
+	.db	   58,   58,   59,   61,    63,   65,   66,   66
+	.db	   66,   66,   66,   67,    69,   71,   73,   74
+
+	.db	   74,   74,   74,   74,    75,   76,   78,   80
+	.db	   81,   82,   82,   81,    82,   83,   84,   86
+	.db	   88,   89,   90,   89,    89,   90,   91,   92
+	.db	   94,   96,   97,   97,    97,   97,   98,   99
+
+	.db	  100,  102,  104,  105,   105,  105,  105,  105
+	.db	  106,  108,  110,  111,   112,  113,  113,  113
+	.db	  113,  114,  116,  118,   119,  120,  121,  121
+	.db	  121,  121,  122,  124,   125,  127,  128,  128
+
+	.db	  128,  128,  128,  129,   131,  132,  134,  135
+	.db	  135,  135,  135,  136,   137,  138,  140,  142
+	.db	  143,  143,  143,  143,   144,  145,  146,  148
+	.db	  150,  151,  151,  151,   151,  151,  152,  154
+
+	.db	  156,  157,  158,  159,   159,  159,  159,  160
+	.db	  162,  164,  165,  166,   167,  167,  166,  167
+	.db	  168,  170,  172,  173,   174,  175,  174,  174
+	.db	  175,  176,  178,  180,   181,  182,  182,  182
+
+	.db	  182,  182,  183,  185,   187,  189,  190,  190
+	.db	  190,  190,  190,  191,   193,  195,  197,  198
+	.db	  198,  198,  197,  197,   199,  201,  204,  206
+	.db	  207,  206,  205,  205,   205,  206,  209,  212
+
+	.db	  214,  215,  214,  213,   212,  212,  213,  216
+	.db	  220,  223,  224,  223,   220,  218,  218,  220
+	.db	  224,  230,  234,  235,   232,  227,  222,  220
+	.db	  224,  233,  244,  253,   254,  242,  215,  175
+
+
+INV_SAW8:
+	; base freqency: 1046.50 Hz, discrets: 18, rms: 7.95, min: -0.98, max: 0.98
+
+	.db	  128,   97,   68,   43,    24,   11,    4,    3
+	.db	    6,   12,   20,   28,    34,   38,   40,   39
+	.db	   37,   34,   30,   28,    27,   27,   29,   33
+	.db	   36,   40,   43,   46,    47,   47,   46,   44
+
+	.db	   43,   42,   42,   43,    44,   47,   49,   52
+	.db	   54,   56,   57,   57,    57,   56,   55,   55
+	.db	   55,   56,   58,   60,    62,   64,   66,   68
+	.db	   68,   69,   68,   68,    68,   68,   68,   69
+
+	.db	   71,   72,   74,   76,    78,   79,   80,   80
+	.db	   80,   80,   80,   80,    81,   82,   83,   85
+	.db	   87,   89,   90,   91,    92,   92,   92,   92
+	.db	   92,   92,   93,   94,    96,   97,   99,  101
+
+	.db	  102,  103,  104,  104,   104,  104,  104,  105
+	.db	  105,  107,  108,  110,   112,  113,  115,  116
+	.db	  116,  116,  116,  116,   117,  117,  118,  119
+	.db	  121,  122,  124,  126,   127,  128,  128,  128
+
+	.db	  128,  128,  128,  128,   129,  130,  132,  134
+	.db	  135,  137,  138,  139,   139,  140,  140,  140
+	.db	  140,  140,  141,  143,   144,  146,  148,  149
+	.db	  151,  151,  152,  152,   152,  152,  152,  153
+
+	.db	  154,  155,  157,  159,   160,  162,  163,  164
+	.db	  164,  164,  164,  164,   164,  165,  166,  167
+	.db	  169,  171,  173,  174,   175,  176,  176,  176
+	.db	  176,  176,  176,  177,   178,  180,  182,  184
+
+	.db	  185,  187,  188,  188,   188,  188,  188,  187
+	.db	  188,  188,  190,  192,   194,  196,  198,  200
+	.db	  201,  201,  201,  200,   199,  199,  199,  200
+	.db	  202,  204,  207,  209,   212,  213,  214,  214
+
+	.db	  213,  212,  210,  209,   209,  210,  213,  216
+	.db	  220,  223,  227,  229,   229,  228,  226,  222
+	.db	  219,  217,  216,  218,   222,  228,  236,  244
+	.db	  250,  253,  252,  245,   232,  213,  188,  159
+
+
+INV_SAW9:
+	; base freqency: 1661.21 Hz, discrets: 11, rms: 7.95, min: -0.97, max: 0.97
+
+	.db	  128,  109,   90,   73,    56,   42,   30,   20
+	.db	   12,    8,    5,    5,     6,    9,   13,   18
+	.db	   24,   29,   34,   38,    42,   44,   46,   47
+	.db	   46,   45,   44,   42,    41,   39,   38,   37
+
+	.db	   36,   37,   38,   39,    41,   44,   47,   49
+	.db	   52,   55,   57,   59,    60,   61,   61,   61
+	.db	   61,   61,   60,   59,    59,   59,   59,   59
+	.db	   60,   61,   63,   65,    67,   69,   71,   73
+
+	.db	   75,   77,   78,   79,    79,   80,   80,   80
+	.db	   80,   79,   79,   79,    79,   80,   80,   82
+	.db	   83,   84,   86,   88,    90,   92,   94,   95
+	.db	   96,   98,   98,   99,    99,   99,   99,   99
+
+	.db	   99,   99,   99,  100,   100,  101,  103,  104
+	.db	  106,  107,  109,  111,   113,  114,  116,  117
+	.db	  117,  118,  118,  119,   119,  119,  119,  119
+	.db	  119,  119,  120,  121,   122,  123,  125,  127
+
+	.db	  128,  129,  131,  133,   134,  135,  136,  137
+	.db	  137,  137,  137,  137,   137,  137,  138,  138
+	.db	  139,  139,  140,  142,   143,  145,  147,  149
+	.db	  150,  152,  153,  155,   156,  156,  157,  157
+
+	.db	  157,  157,  157,  157,   157,  157,  158,  158
+	.db	  160,  161,  162,  164,   166,  168,  170,  172
+	.db	  173,  174,  176,  176,   177,  177,  177,  177
+	.db	  176,  176,  176,  176,   177,  177,  178,  179
+
+	.db	  181,  183,  185,  187,   189,  191,  193,  195
+	.db	  196,  197,  197,  197,   197,  197,  196,  195
+	.db	  195,  195,  195,  195,   196,  197,  199,  201
+	.db	  204,  207,  209,  212,   215,  217,  218,  219
+
+	.db	  220,  219,  218,  217,   215,  214,  212,  211
+	.db	  210,  209,  210,  212,   214,  218,  222,  227
+	.db	  232,  238,  243,  247,   250,  251,  251,  248
+	.db	  244,  236,  226,  214,   200,  183,  166,  147
+
+
+INV_SAW10:
+	; base freqency: 2637.01 Hz, discrets: 7, rms: 7.95, min: -0.94, max: 0.94
+
+	.db	  128,  116,  104,   91,    80,   69,   58,   49
+	.db	   40,   32,   26,   20,    15,   12,   10,    8
+	.db	    8,    8,    9,   11,    14,   17,   20,   24
+	.db	   28,   32,   35,   39,    42,   46,   48,   51
+
+	.db	   53,   54,   56,   56,    57,   57,   56,   56
+	.db	   55,   54,   54,   53,    52,   51,   50,   50
+	.db	   50,   50,   51,   51,    52,   53,   55,   57
+	.db	   59,   61,   63,   65,    67,   69,   72,   74
+
+	.db	   76,   77,   79,   80,    81,   82,   83,   83
+	.db	   83,   83,   83,   83,    83,   83,   83,   82
+	.db	   82,   82,   83,   83,    84,   84,   85,   86
+	.db	   88,   89,   91,   92,    94,   96,   98,  100
+
+	.db	  102,  103,  105,  107,   108,  109,  110,  111
+	.db	  112,  112,  113,  113,   113,  113,  113,  113
+	.db	  113,  113,  113,  114,   114,  114,  115,  116
+	.db	  116,  118,  119,  120,   122,  123,  125,  127
+
+	.db	  128,  129,  131,  133,   134,  136,  137,  138
+	.db	  140,  140,  141,  142,   142,  142,  143,  143
+	.db	  143,  143,  143,  143,   143,  143,  143,  144
+	.db	  144,  145,  146,  147,   148,  149,  151,  153
+
+	.db	  154,  156,  158,  160,   162,  164,  165,  167
+	.db	  168,  170,  171,  172,   172,  173,  173,  174
+	.db	  174,  174,  173,  173,   173,  173,  173,  173
+	.db	  173,  173,  173,  174,   175,  176,  177,  179
+
+	.db	  180,  182,  184,  187,   189,  191,  193,  195
+	.db	  197,  199,  201,  203,   204,  205,  205,  206
+	.db	  206,  206,  206,  205,   204,  203,  202,  202
+	.db	  201,  200,  200,  199,   199,  200,  200,  202
+
+	.db	  203,  205,  208,  210,   214,  217,  221,  224
+	.db	  228,  232,  236,  239,   242,  245,  247,  248
+	.db	  248,  248,  246,  244,   241,  236,  230,  224
+	.db	  216,  207,  198,  187,   176,  165,  152,  140
+
+
+INV_SAW11:
+	; base freqency: 4185.98 Hz, discrets: 5, rms: 7.95, min: -0.92, max: 0.92
+
+	.db	  128,  119,  110,  101,    93,   84,   76,   68
+	.db	   60,   53,   47,   41,    35,   30,   26,   22
+	.db	   19,   16,   14,   12,    11,   11,   11,   11
+	.db	   12,   14,   16,   18,    20,   23,   26,   29
+
+	.db	   32,   35,   38,   41,    44,   47,   50,   53
+	.db	   55,   58,   60,   61,    63,   64,   66,   67
+	.db	   67,   68,   68,   68,    68,   68,   68,   67
+	.db	   67,   66,   66,   65,    65,   65,   64,   64
+
+	.db	   64,   64,   64,   65,    65,   66,   67,   68
+	.db	   69,   70,   72,   73,    75,   77,   79,   81
+	.db	   83,   85,   87,   89,    91,   92,   94,   96
+	.db	   98,   99,  101,  102,   103,  104,  105,  105
+
+	.db	  106,  107,  107,  107,   107,  107,  108,  108
+	.db	  107,  107,  107,  107,   107,  108,  108,  108
+	.db	  108,  109,  109,  110,   111,  112,  113,  114
+	.db	  115,  117,  118,  120,   121,  123,  125,  127
+
+	.db	  128,  129,  131,  133,   135,  136,  138,  139
+	.db	  141,  142,  143,  144,   145,  146,  147,  147
+	.db	  148,  148,  148,  148,   149,  149,  149,  149
+	.db	  149,  148,  148,  149,   149,  149,  149,  149
+
+	.db	  150,  151,  151,  152,   153,  154,  155,  157
+	.db	  158,  160,  162,  164,   165,  167,  169,  171
+	.db	  173,  175,  177,  179,   181,  183,  184,  186
+	.db	  187,  188,  189,  190,   191,  191,  192,  192
+
+	.db	  192,  192,  192,  191,   191,  191,  190,  190
+	.db	  189,  189,  188,  188,   188,  188,  188,  188
+	.db	  189,  189,  190,  192,   193,  195,  196,  198
+	.db	  201,  203,  206,  209,   212,  215,  218,  221
+
+	.db	  224,  227,  230,  233,   236,  238,  240,  242
+	.db	  244,  245,  245,  245,   245,  244,  242,  240
+	.db	  237,  234,  230,  226,   221,  215,  209,  203
+	.db	  196,  188,  180,  172,   163,  155,  146,  137
+
+
+
+;-----------------------------------------------------------------------------
+;
+;*** Bandlimited square wavetables (each table is 256 bytes long, unsigned integer)
+SQ_LIMIT0:
+	; base freqency: 25.96 Hz, discrets: 350, rms: 12.65, min: -0.81, max: 0.81
+
+	.db	  128,  230,  231,  229,   228,  229,  230,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  230,  229,   228,  229,  231,  230
+
+	.db	  128,   26,   25,   27,    28,   27,   26,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   26,   27,    28,   27,   25,   26
+
+
+SQ_LIMIT1:
+	; base freqency: 41.20 Hz, discrets: 221, rms: 12.65, min: -0.82, max: 0.82
+
+	.db	  128,  230,  232,  228,   228,  230,  230,  228
+	.db	  229,  230,  229,  228,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  228,  229,  230
+	.db	  229,  228,  230,  230,   228,  228,  232,  230
+
+	.db	  128,   26,   24,   28,    28,   26,   26,   28
+	.db	   27,   26,   27,   28,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   28,   27,   26
+	.db	   27,   28,   26,   26,    28,   28,   24,   26
+
+
+SQ_LIMIT2:
+	; base freqency: 65.41 Hz, discrets: 139, rms: 12.65, min: -0.81, max: 0.81
+
+	.db	  128,  221,  227,  229,   230,  231,  231,  230
+	.db	  230,  229,  229,  228,   228,  229,  229,  229
+	.db	  230,  230,  230,  230,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  230,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  230,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  230,  230,  230
+	.db	  230,  229,  229,  229,   228,  228,  229,  229
+	.db	  230,  230,  231,  231,   230,  229,  227,  221
+
+	.db	  128,   35,   29,   27,    26,   25,   25,   26
+	.db	   26,   27,   27,   28,    28,   27,   27,   27
+	.db	   26,   26,   26,   26,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   26,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   26,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   26,   26,   26
+	.db	   26,   27,   27,   27,    28,   28,   27,   27
+	.db	   26,   26,   25,   25,    26,   27,   29,   35
+
+
+SQ_LIMIT3:
+	; base freqency: 103.83 Hz, discrets: 88, rms: 12.65, min: -0.85, max: 0.85
+
+	.db	  128,  237,  234,  224,   229,  232,  227,  228
+	.db	  231,  228,  228,  230,   229,  228,  230,  229
+	.db	  228,  229,  230,  228,   229,  230,  228,  229
+	.db	  230,  229,  229,  229,   229,  228,  229,  229
+
+	.db	  228,  229,  229,  228,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  229,  229,  229
+	.db	  229,  229,  229,  229,   229,  228,  229,  229
+
+	.db	  228,  229,  229,  228,   229,  229,  229,  229
+	.db	  230,  229,  228,  230,   229,  228,  230,  229
+	.db	  228,  229,  230,  228,   229,  230,  228,  228
+	.db	  231,  228,  227,  232,   229,  224,  234,  237
+
+	.db	  128,   19,   22,   32,    27,   24,   29,   28
+	.db	   25,   28,   28,   26,    27,   28,   26,   27
+	.db	   28,   27,   26,   28,    27,   26,   28,   27
+	.db	   26,   27,   27,   27,    27,   28,   27,   27
+
+	.db	   28,   27,   27,   28,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   27,   27,   27
+	.db	   27,   27,   27,   27,    27,   28,   27,   27
+
+	.db	   28,   27,   27,   28,    27,   27,   27,   27
+	.db	   26,   27,   28,   26,    27,   28,   26,   27
+	.db	   28,   27,   26,   28,    27,   26,   28,   28
+	.db	   25,   28,   29,   24,    27,   32,   22,   19
+
+
+SQ_LIMIT4:
+	; base freqency: 164.81 Hz, discrets: 55, rms: 12.65, min: -0.92, max: 0.92
+
+	.db	  128,  245,  223,  230,   231,  226,  232,  225
+	.db	  232,  227,  229,  229,   228,  231,  227,  230
+	.db	  228,  229,  229,  228,   230,  228,  230,  228
+	.db	  229,  229,  228,  230,   228,  230,  228,  229
+
+	.db	  229,  229,  229,  228,   230,  228,  229,  229
+	.db	  229,  229,  228,  230,   228,  229,  229,  229
+	.db	  229,  228,  229,  228,   229,  229,  229,  229
+	.db	  228,  229,  228,  229,   229,  229,  229,  228
+
+	.db	  229,  228,  229,  229,   229,  229,  228,  229
+	.db	  228,  229,  229,  229,   229,  228,  229,  228
+	.db	  229,  229,  229,  229,   228,  230,  228,  229
+	.db	  229,  229,  229,  228,   230,  228,  229,  229
+
+	.db	  229,  229,  228,  230,   228,  230,  228,  229
+	.db	  229,  228,  230,  228,   230,  228,  229,  229
+	.db	  228,  230,  227,  231,   228,  229,  229,  227
+	.db	  232,  225,  232,  226,   231,  230,  223,  245
+
+	.db	  128,   11,   33,   26,    25,   30,   24,   31
+	.db	   24,   29,   27,   27,    28,   25,   29,   26
+	.db	   28,   27,   27,   28,    26,   28,   26,   28
+	.db	   27,   27,   28,   26,    28,   26,   28,   27
+
+	.db	   27,   27,   27,   28,    26,   28,   27,   27
+	.db	   27,   27,   28,   26,    28,   27,   27,   27
+	.db	   27,   28,   27,   28,    27,   27,   27,   27
+	.db	   28,   27,   28,   27,    27,   27,   27,   28
+
+	.db	   27,   28,   27,   27,    27,   27,   28,   27
+	.db	   28,   27,   27,   27,    27,   28,   27,   28
+	.db	   27,   27,   27,   27,    28,   26,   28,   27
+	.db	   27,   27,   27,   28,    26,   28,   27,   27
+
+	.db	   27,   27,   28,   26,    28,   26,   28,   27
+	.db	   27,   28,   26,   28,    26,   28,   27,   27
+	.db	   28,   26,   29,   25,    28,   27,   27,   29
+	.db	   24,   31,   24,   30,    25,   26,   33,   11
+
+
+SQ_LIMIT5:
+	; base freqency: 261.62 Hz, discrets: 35, rms: 12.65, min: -0.93, max: 0.93
+
+	.db	  128,  222,  246,  226,   221,  233,  233,  225
+	.db	  227,  233,  230,  226,   229,  232,  228,  227
+	.db	  231,  230,  227,  228,   231,  229,  227,  229
+	.db	  231,  228,  228,  230,   230,  228,  229,  230
+
+	.db	  229,  228,  229,  230,   228,  228,  230,  230
+	.db	  228,  229,  230,  229,   228,  229,  230,  228
+	.db	  228,  230,  229,  228,   229,  230,  229,  228
+	.db	  229,  230,  228,  228,   230,  229,  228,  229
+
+	.db	  230,  229,  228,  229,   230,  228,  228,  230
+	.db	  229,  228,  229,  230,   229,  228,  229,  230
+	.db	  228,  228,  230,  229,   228,  229,  230,  229
+	.db	  228,  230,  230,  228,   228,  230,  229,  228
+
+	.db	  229,  230,  229,  228,   230,  230,  228,  228
+	.db	  231,  229,  227,  229,   231,  228,  227,  230
+	.db	  231,  227,  228,  232,   229,  226,  230,  233
+	.db	  227,  225,  233,  233,   221,  226,  246,  222
+
+	.db	  128,   34,   10,   30,    35,   23,   23,   31
+	.db	   29,   23,   26,   30,    27,   24,   28,   29
+	.db	   25,   26,   29,   28,    25,   27,   29,   27
+	.db	   25,   28,   28,   26,    26,   28,   27,   26
+
+	.db	   27,   28,   27,   26,    28,   28,   26,   26
+	.db	   28,   27,   26,   27,    28,   27,   26,   28
+	.db	   28,   26,   27,   28,    27,   26,   27,   28
+	.db	   27,   26,   28,   28,    26,   27,   28,   27
+
+	.db	   26,   27,   28,   27,    26,   28,   28,   26
+	.db	   27,   28,   27,   26,    27,   28,   27,   26
+	.db	   28,   28,   26,   27,    28,   27,   26,   27
+	.db	   28,   26,   26,   28,    28,   26,   27,   28
+
+	.db	   27,   26,   27,   28,    26,   26,   28,   28
+	.db	   25,   27,   29,   27,    25,   28,   29,   26
+	.db	   25,   29,   28,   24,    27,   30,   26,   23
+	.db	   29,   31,   23,   23,    35,   30,   10,   34
+
+
+SQ_LIMIT6:
+	; base freqency: 415.30 Hz, discrets: 22, rms: 12.65, min: -0.94, max: 0.94
+
+	.db	  128,  193,  236,  247,   237,  223,  219,  226
+	.db	  234,  236,  231,  225,   224,  228,  233,  233
+	.db	  229,  226,  226,  229,   232,  232,  229,  227
+	.db	  227,  230,  232,  231,   228,  227,  228,  230
+
+	.db	  231,  230,  228,  227,   228,  230,  231,  230
+	.db	  228,  227,  229,  230,   231,  229,  228,  228
+	.db	  229,  231,  230,  229,   228,  228,  229,  231
+	.db	  230,  229,  228,  228,   230,  231,  230,  228
+
+	.db	  228,  228,  230,  231,   230,  228,  228,  229
+	.db	  230,  231,  229,  228,   228,  229,  230,  231
+	.db	  229,  228,  228,  229,   231,  230,  229,  227
+	.db	  228,  230,  231,  230,   228,  227,  228,  230
+
+	.db	  231,  230,  228,  227,   228,  231,  232,  230
+	.db	  227,  227,  229,  232,   232,  229,  226,  226
+	.db	  229,  233,  233,  228,   224,  225,  231,  236
+	.db	  234,  226,  219,  223,   237,  247,  236,  193
+
+	.db	  128,   63,   20,    9,    19,   33,   37,   30
+	.db	   22,   20,   25,   31,    32,   28,   23,   23
+	.db	   27,   30,   30,   27,    24,   24,   27,   29
+	.db	   29,   26,   24,   25,    28,   29,   28,   26
+
+	.db	   25,   26,   28,   29,    28,   26,   25,   26
+	.db	   28,   29,   27,   26,    25,   27,   28,   28
+	.db	   27,   25,   26,   27,    28,   28,   27,   25
+	.db	   26,   27,   28,   28,    26,   25,   26,   28
+
+	.db	   28,   28,   26,   25,    26,   28,   28,   27
+	.db	   26,   25,   27,   28,    28,   27,   26,   25
+	.db	   27,   28,   28,   27,    25,   26,   27,   29
+	.db	   28,   26,   25,   26,    28,   29,   28,   26
+
+	.db	   25,   26,   28,   29,    28,   25,   24,   26
+	.db	   29,   29,   27,   24,    24,   27,   30,   30
+	.db	   27,   23,   23,   28,    32,   31,   25,   20
+	.db	   22,   30,   37,   33,    19,    9,   20,   63
+
+
+SQ_LIMIT7:
+	; base freqency: 659.25 Hz, discrets: 14, rms: 12.65, min: -0.93, max: 0.93
+
+	.db	  128,  171,  208,  233,   246,  247,  240,  231
+	.db	  223,  219,  221,  226,   232,  235,  236,  234
+	.db	  230,  226,  224,  225,   227,  231,  233,  234
+	.db	  233,  230,  227,  226,   226,  228,  230,  232
+
+	.db	  233,  232,  230,  228,   227,  227,  228,  230
+	.db	  231,  232,  232,  230,   228,  227,  227,  228
+	.db	  229,  231,  232,  232,   230,  229,  227,  227
+	.db	  228,  229,  231,  232,   232,  231,  229,  228
+
+	.db	  227,  228,  229,  231,   232,  232,  231,  229
+	.db	  228,  227,  227,  229,   230,  232,  232,  231
+	.db	  229,  228,  227,  227,   228,  230,  232,  232
+	.db	  231,  230,  228,  227,   227,  228,  230,  232
+
+	.db	  233,  232,  230,  228,   226,  226,  227,  230
+	.db	  233,  234,  233,  231,   227,  225,  224,  226
+	.db	  230,  234,  236,  235,   232,  226,  221,  219
+	.db	  223,  231,  240,  247,   246,  233,  208,  171
+
+	.db	  128,   85,   48,   23,    10,    9,   16,   25
+	.db	   33,   37,   35,   30,    24,   21,   20,   22
+	.db	   26,   30,   32,   31,    29,   25,   23,   22
+	.db	   23,   26,   29,   30,    30,   28,   26,   24
+
+	.db	   23,   24,   26,   28,    29,   29,   28,   26
+	.db	   25,   24,   24,   26,    28,   29,   29,   28
+	.db	   27,   25,   24,   24,    26,   27,   29,   29
+	.db	   28,   27,   25,   24,    24,   25,   27,   28
+
+	.db	   29,   28,   27,   25,    24,   24,   25,   27
+	.db	   28,   29,   29,   27,    26,   24,   24,   25
+	.db	   27,   28,   29,   29,    28,   26,   24,   24
+	.db	   25,   26,   28,   29,    29,   28,   26,   24
+
+	.db	   23,   24,   26,   28,    30,   30,   29,   26
+	.db	   23,   22,   23,   25,    29,   31,   32,   30
+	.db	   26,   22,   20,   21,    24,   30,   35,   37
+	.db	   33,   25,   16,    9,    10,   23,   48,   85
+
+
+SQ_LIMIT8:
+	; base freqency: 1046.50 Hz, discrets: 9, rms: 12.65, min: -0.94, max: 0.94
+
+	.db	  128,  156,  183,  206,   224,  238,  246,  248
+	.db	  247,  242,  236,  230,   225,  221,  220,  220
+	.db	  223,  226,  230,  233,   236,  237,  237,  235
+	.db	  233,  230,  227,  225,   224,  224,  226,  227
+
+	.db	  230,  232,  233,  234,   234,  234,  232,  230
+	.db	  228,  227,  226,  226,   226,  228,  229,  231
+	.db	  233,  233,  234,  233,   232,  230,  229,  227
+	.db	  226,  226,  227,  228,   229,  231,  232,  233
+
+	.db	  233,  233,  232,  231,   229,  228,  227,  226
+	.db	  226,  227,  229,  230,   232,  233,  234,  233
+	.db	  233,  231,  229,  228,   226,  226,  226,  227
+	.db	  228,  230,  232,  234,   234,  234,  233,  232
+
+	.db	  230,  227,  226,  224,   224,  225,  227,  230
+	.db	  233,  235,  237,  237,   236,  233,  230,  226
+	.db	  223,  220,  220,  221,   225,  230,  236,  242
+	.db	  247,  248,  246,  238,   224,  206,  183,  156
+
+	.db	  128,  100,   73,   50,    32,   18,   10,    8
+	.db	    9,   14,   20,   26,    31,   35,   36,   36
+	.db	   33,   30,   26,   23,    20,   19,   19,   21
+	.db	   23,   26,   29,   31,    32,   32,   30,   29
+
+	.db	   26,   24,   23,   22,    22,   22,   24,   26
+	.db	   28,   29,   30,   30,    30,   28,   27,   25
+	.db	   23,   23,   22,   23,    24,   26,   27,   29
+	.db	   30,   30,   29,   28,    27,   25,   24,   23
+
+	.db	   23,   23,   24,   25,    27,   28,   29,   30
+	.db	   30,   29,   27,   26,    24,   23,   22,   23
+	.db	   23,   25,   27,   28,    30,   30,   30,   29
+	.db	   28,   26,   24,   22,    22,   22,   23,   24
+
+	.db	   26,   29,   30,   32,    32,   31,   29,   26
+	.db	   23,   21,   19,   19,    20,   23,   26,   30
+	.db	   33,   36,   36,   35,    31,   26,   20,   14
+	.db	    9,    8,   10,   18,    32,   50,   73,  100
+
+
+SQ_LIMIT9:
+	; base freqency: 1661.21 Hz, discrets: 5, rms: 12.65, min: -0.95, max: 0.95
+
+	.db	  128,  144,  159,  175,   189,  202,  214,  224
+	.db	  232,  239,  244,  247,   249,  250,  249,  247
+	.db	  244,  241,  237,  234,   230,  227,  225,  222
+	.db	  221,  220,  220,  221,   222,  223,  225,  228
+
+	.db	  230,  232,  234,  236,   237,  238,  239,  239
+	.db	  238,  237,  236,  234,   233,  231,  229,  227
+	.db	  226,  225,  224,  224,   224,  225,  226,  227
+	.db	  228,  230,  231,  233,   234,  236,  237,  237
+
+	.db	  237,  237,  237,  236,   234,  233,  231,  230
+	.db	  228,  227,  226,  225,   224,  224,  224,  225
+	.db	  226,  227,  229,  231,   233,  234,  236,  237
+	.db	  238,  239,  239,  238,   237,  236,  234,  232
+
+	.db	  230,  228,  225,  223,   222,  221,  220,  220
+	.db	  221,  222,  225,  227,   230,  234,  237,  241
+	.db	  244,  247,  249,  250,   249,  247,  244,  239
+	.db	  232,  224,  214,  202,   189,  175,  159,  144
+
+	.db	  128,  112,   97,   81,    67,   54,   42,   32
+	.db	   24,   17,   12,    9,     7,    6,    7,    9
+	.db	   12,   15,   19,   22,    26,   29,   31,   34
+	.db	   35,   36,   36,   35,    34,   33,   31,   28
+
+	.db	   26,   24,   22,   20,    19,   18,   17,   17
+	.db	   18,   19,   20,   22,    23,   25,   27,   29
+	.db	   30,   31,   32,   32,    32,   31,   30,   29
+	.db	   28,   26,   25,   23,    22,   20,   19,   19
+
+	.db	   19,   19,   19,   20,    22,   23,   25,   26
+	.db	   28,   29,   30,   31,    32,   32,   32,   31
+	.db	   30,   29,   27,   25,    23,   22,   20,   19
+	.db	   18,   17,   17,   18,    19,   20,   22,   24
+
+	.db	   26,   28,   31,   33,    34,   35,   36,   36
+	.db	   35,   34,   31,   29,    26,   22,   19,   15
+	.db	   12,    9,    7,    6,     7,    9,   12,   17
+	.db	   24,   32,   42,   54,    67,   81,   97,  112
+
+
+SQ_LIMIT10:
+	; base freqency: 2637.01 Hz, discrets: 3, rms: 12.65, min: -0.97, max: 0.97
+
+	.db	  128,  137,  147,  157,   166,  175,  184,  192
+	.db	  200,  208,  215,  221,   227,  232,  237,  241
+	.db	  244,  247,  249,  251,   252,  252,  252,  251
+	.db	  250,  249,  248,  246,   244,  241,  239,  237
+
+	.db	  234,  232,  230,  228,   226,  224,  223,  222
+	.db	  221,  220,  220,  220,   220,  221,  221,  222
+	.db	  224,  225,  226,  228,   230,  231,  233,  235
+	.db	  236,  238,  239,  240,   241,  242,  243,  243
+
+	.db	  243,  243,  243,  242,   241,  240,  239,  238
+	.db	  236,  235,  233,  231,   230,  228,  226,  225
+	.db	  224,  222,  221,  221,   220,  220,  220,  220
+	.db	  221,  222,  223,  224,   226,  228,  230,  232
+
+	.db	  234,  237,  239,  241,   244,  246,  248,  249
+	.db	  250,  251,  252,  252,   252,  251,  249,  247
+	.db	  244,  241,  237,  232,   227,  221,  215,  208
+	.db	  200,  192,  184,  175,   166,  157,  147,  137
+
+	.db	  128,  119,  109,   99,    90,   81,   72,   64
+	.db	   56,   48,   41,   35,    29,   24,   19,   15
+	.db	   12,    9,    7,    5,     4,    4,    4,    5
+	.db	    6,    7,    8,   10,    12,   15,   17,   19
+
+	.db	   22,   24,   26,   28,    30,   32,   33,   34
+	.db	   35,   36,   36,   36,    36,   35,   35,   34
+	.db	   32,   31,   30,   28,    26,   25,   23,   21
+	.db	   20,   18,   17,   16,    15,   14,   13,   13
+
+	.db	   13,   13,   13,   14,    15,   16,   17,   18
+	.db	   20,   21,   23,   25,    26,   28,   30,   31
+	.db	   32,   34,   35,   35,    36,   36,   36,   36
+	.db	   35,   34,   33,   32,    30,   28,   26,   24
+
+	.db	   22,   19,   17,   15,    12,   10,    8,    7
+	.db	    6,    5,    4,    4,     4,    5,    7,    9
+	.db	   12,   15,   19,   24,    29,   35,   41,   48
+	.db	   56,   64,   72,   81,    90,   99,  109,  119
+
+
+SQ_LIMIT11:
+	; base freqency: 4185.98 Hz, discrets: 2, rms: 12.65, min: -1.00, max: 1.00
+
+	.db	  128,  134,  141,  147,   154,  160,  167,  173
+	.db	  179,  185,  191,  196,   202,  207,  212,  217
+	.db	  221,  225,  229,  233,   237,  240,  242,  245
+	.db	  247,  249,  251,  252,   254,  254,  255,  255
+
+	.db	  255,  255,  255,  255,   254,  253,  252,  251
+	.db	  249,  248,  246,  245,   243,  241,  239,  237
+	.db	  236,  234,  232,  230,   229,  227,  226,  224
+	.db	  223,  222,  221,  220,   219,  219,  218,  218
+
+	.db	  218,  218,  218,  219,   219,  220,  221,  222
+	.db	  223,  224,  226,  227,   229,  230,  232,  234
+	.db	  236,  237,  239,  241,   243,  245,  246,  248
+	.db	  249,  251,  252,  253,   254,  255,  255,  255
+
+	.db	  255,  255,  255,  254,   254,  252,  251,  249
+	.db	  247,  245,  242,  240,   237,  233,  229,  225
+	.db	  221,  217,  212,  207,   202,  196,  191,  185
+	.db	  179,  173,  167,  160,   154,  147,  141,  134
+
+	.db	  128,  122,  115,  109,   102,   96,   89,   83
+	.db	   77,   71,   65,   60,    54,   49,   44,   39
+	.db	   35,   31,   27,   23,    19,   16,   14,   11
+	.db	    9,    7,    5,    4,     2,    2,    1,    1
+
+	.db	    0,    1,    1,    1,     2,    3,    4,    5
+	.db	    7,    8,   10,   11,    13,   15,   17,   19
+	.db	   20,   22,   24,   26,    27,   29,   30,   32
+	.db	   33,   34,   35,   36,    37,   37,   38,   38
+
+	.db	   38,   38,   38,   37,    37,   36,   35,   34
+	.db	   33,   32,   30,   29,    27,   26,   24,   22
+	.db	   20,   19,   17,   15,    13,   11,   10,    8
+	.db	    7,    5,    4,    3,     2,    1,    1,    1
+
+	.db	    0,    1,    1,    2,     2,    4,    5,    7
+	.db	    9,   11,   14,   16,    19,   23,   27,   31
+	.db	   35,   39,   44,   49,    54,   60,   65,   71
+	.db	   77,   83,   89,   96,   102,  109,  115,  122
+
+
+
+;-----------------------------------------------------------------------------
+;
+;*** Bandlimited triangle wavetables (each table is 256 bytes long, unsigned integer)
+TRI_LIMIT0:
+	; base freqency: 25.96 Hz, discrets: 350, rms: 9.24, min: -1.00, max: 1.00
+
+	.db	  128,  126,  124,  122,   120,  118,  116,  114
+	.db	  112,  110,  108,  106,   104,  102,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   28,   26,    24,   22,   20,   18
+	.db	   16,   14,   12,   10,     8,    6,    4,    2
+
+	.db	    0,    2,    4,    6,     8,   10,   12,   14
+	.db	   16,   18,   20,   22,    24,   26,   28,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  102,   104,  106,  108,  110
+	.db	  112,  114,  116,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  140,  142
+	.db	  144,  146,  148,  150,   152,  154,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  228,  230,   232,  234,  236,  238
+	.db	  240,  242,  244,  246,   248,  250,  252,  254
+
+	.db	  255,  254,  252,  250,   248,  246,  244,  242
+	.db	  240,  238,  236,  234,   232,  230,  228,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  154,   152,  150,  148,  146
+	.db	  144,  142,  140,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT1:
+	; base freqency: 41.20 Hz, discrets: 221, rms: 9.24, min: -1.00, max: 1.00
+
+	.db	  128,  126,  124,  122,   120,  118,  116,  114
+	.db	  112,  110,  108,  106,   104,  102,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   28,   26,    24,   22,   20,   18
+	.db	   16,   14,   12,   10,     8,    6,    4,    2
+
+	.db	    1,    2,    4,    6,     8,   10,   12,   14
+	.db	   16,   18,   20,   22,    24,   26,   28,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  102,   104,  106,  108,  110
+	.db	  112,  114,  116,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  140,  142
+	.db	  144,  146,  148,  150,   152,  154,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  228,  230,   232,  234,  236,  238
+	.db	  240,  242,  244,  246,   248,  250,  252,  254
+
+	.db	  255,  254,  252,  250,   248,  246,  244,  242
+	.db	  240,  238,  236,  234,   232,  230,  228,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  154,   152,  150,  148,  146
+	.db	  144,  142,  140,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT2:
+	; base freqency: 65.41 Hz, discrets: 139, rms: 9.24, min: -1.00, max: 1.00
+
+	.db	  128,  126,  124,  122,   120,  118,  116,  114
+	.db	  112,  110,  108,  106,   104,  102,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   28,   26,    24,   22,   20,   18
+	.db	   16,   14,   12,   10,     8,    6,    4,    2
+
+	.db	    1,    2,    4,    6,     8,   10,   12,   14
+	.db	   16,   18,   20,   22,    24,   26,   28,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  102,   104,  106,  108,  110
+	.db	  112,  114,  116,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  140,  142
+	.db	  144,  146,  148,  150,   152,  154,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  228,  230,   232,  234,  236,  238
+	.db	  240,  242,  244,  246,   248,  250,  252,  254
+
+	.db	  255,  254,  252,  250,   248,  246,  244,  242
+	.db	  240,  238,  236,  234,   232,  230,  228,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  154,   152,  150,  148,  146
+	.db	  144,  142,  140,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT3:
+	; base freqency: 103.83 Hz, discrets: 88, rms: 9.24, min: -1.00, max: 1.00
+
+	.db	  128,  126,  124,  122,   120,  118,  116,  114
+	.db	  112,  110,  108,  106,   104,  102,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   28,   26,    24,   22,   20,   18
+	.db	   16,   14,   12,   10,     8,    6,    4,    2
+
+	.db	    1,    2,    4,    6,     8,   10,   12,   14
+	.db	   16,   18,   20,   22,    24,   26,   28,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  102,   104,  106,  108,  110
+	.db	  112,  114,  116,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  140,  142
+	.db	  144,  146,  148,  150,   152,  154,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  228,  230,   232,  234,  236,  238
+	.db	  240,  242,  244,  246,   248,  250,  252,  254
+
+	.db	  255,  254,  252,  250,   248,  246,  244,  242
+	.db	  240,  238,  236,  234,   232,  230,  228,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  154,   152,  150,  148,  146
+	.db	  144,  142,  140,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT4:
+	; base freqency: 164.81 Hz, discrets: 55, rms: 9.24, min: -1.00, max: 1.00
+
+	.db	  128,  126,  125,  122,   120,  118,  116,  114
+	.db	  112,  110,  108,  106,   104,  102,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   28,   26,    24,   22,   20,   18
+	.db	   16,   14,   12,   10,     8,    6,    4,    2
+
+	.db	    1,    2,    4,    6,     8,   10,   12,   14
+	.db	   16,   18,   20,   22,    24,   26,   28,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  102,   104,  106,  108,  110
+	.db	  112,  114,  116,  118,   120,  122,  125,  126
+
+	.db	  128,  130,  131,  134,   136,  138,  140,  142
+	.db	  144,  146,  148,  150,   152,  154,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  228,  230,   232,  234,  236,  238
+	.db	  240,  242,  244,  246,   248,  250,  252,  254
+
+	.db	  255,  254,  252,  250,   248,  246,  244,  242
+	.db	  240,  238,  236,  234,   232,  230,  228,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  154,   152,  150,  148,  146
+	.db	  144,  142,  140,  138,   136,  134,  131,  130
+
+
+TRI_LIMIT5:
+	; base freqency: 261.62 Hz, discrets: 35, rms: 9.24, min: -0.99, max: 0.99
+
+	.db	  128,  126,  125,  123,   120,  118,  117,  114
+	.db	  112,  110,  108,  106,   104,  102,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   28,   26,    24,   22,   20,   18
+	.db	   16,   14,   12,   10,     8,    7,    4,    2
+
+	.db	    1,    2,    4,    7,     8,   10,   12,   14
+	.db	   16,   18,   20,   22,    24,   26,   28,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  102,   104,  106,  108,  110
+	.db	  112,  114,  117,  118,   120,  123,  125,  126
+
+	.db	  128,  130,  131,  133,   136,  138,  139,  142
+	.db	  144,  146,  148,  150,   152,  154,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  228,  230,   232,  234,  236,  238
+	.db	  240,  242,  244,  246,   248,  249,  252,  254
+
+	.db	  255,  254,  252,  249,   248,  246,  244,  242
+	.db	  240,  238,  236,  234,   232,  230,  228,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  154,   152,  150,  148,  146
+	.db	  144,  142,  139,  138,   136,  133,  131,  130
+
+
+TRI_LIMIT6:
+	; base freqency: 415.30 Hz, discrets: 22, rms: 9.24, min: -0.99, max: 0.99
+
+	.db	  128,  127,  125,  122,   120,  118,  116,  115
+	.db	  113,  110,  108,  106,   104,  103,  100,   98
+	.db	   96,   94,   92,   91,    88,   86,   84,   82
+	.db	   80,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   52,   50
+	.db	   48,   46,   44,   42,    40,   38,   36,   34
+	.db	   33,   30,   28,   26,    24,   23,   21,   18
+	.db	   16,   14,   12,   11,     9,    6,    4,    2
+
+	.db	    2,    2,    4,    6,     9,   11,   12,   14
+	.db	   16,   18,   21,   23,    24,   26,   28,   30
+	.db	   33,   34,   36,   38,    40,   42,   44,   46
+	.db	   48,   50,   52,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   80,   82,   84,   86,    88,   91,   92,   94
+	.db	   96,   98,  100,  103,   104,  106,  108,  110
+	.db	  113,  115,  116,  118,   120,  122,  125,  127
+
+	.db	  128,  129,  131,  134,   136,  138,  140,  141
+	.db	  143,  146,  148,  150,   152,  153,  156,  158
+	.db	  160,  162,  164,  165,   168,  170,  172,  174
+	.db	  176,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  204,  206
+	.db	  208,  210,  212,  214,   216,  218,  220,  222
+	.db	  223,  226,  228,  230,   232,  233,  235,  238
+	.db	  240,  242,  244,  245,   247,  250,  252,  254
+
+	.db	  254,  254,  252,  250,   247,  245,  244,  242
+	.db	  240,  238,  235,  233,   232,  230,  228,  226
+	.db	  223,  222,  220,  218,   216,  214,  212,  210
+	.db	  208,  206,  204,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  176,  174,  172,  170,   168,  165,  164,  162
+	.db	  160,  158,  156,  153,   152,  150,  148,  146
+	.db	  143,  141,  140,  138,   136,  134,  131,  129
+
+
+TRI_LIMIT7:
+	; base freqency: 659.25 Hz, discrets: 14, rms: 9.24, min: -0.99, max: 0.99
+
+	.db	  128,  127,  125,  123,   121,  118,  116,  114
+	.db	  112,  110,  109,  107,   105,  103,  100,   98
+	.db	   96,   94,   92,   91,    89,   87,   85,   82
+	.db	   80,   78,   76,   74,    73,   71,   69,   67
+
+	.db	   64,   62,   60,   58,    56,   54,   53,   51
+	.db	   49,   46,   44,   42,    40,   38,   36,   35
+	.db	   33,   31,   28,   26,    24,   22,   20,   19
+	.db	   17,   15,   13,   10,     8,    6,    4,    3
+
+	.db	    2,    3,    4,    6,     8,   10,   13,   15
+	.db	   17,   19,   20,   22,    24,   26,   28,   31
+	.db	   33,   35,   36,   38,    40,   42,   44,   46
+	.db	   49,   51,   53,   54,    56,   58,   60,   62
+
+	.db	   64,   67,   69,   71,    73,   74,   76,   78
+	.db	   80,   82,   85,   87,    89,   91,   92,   94
+	.db	   96,   98,  100,  103,   105,  107,  109,  110
+	.db	  112,  114,  116,  118,   121,  123,  125,  127
+
+	.db	  128,  129,  131,  133,   135,  138,  140,  142
+	.db	  144,  146,  147,  149,   151,  153,  156,  158
+	.db	  160,  162,  164,  165,   167,  169,  171,  174
+	.db	  176,  178,  180,  182,   183,  185,  187,  189
+
+	.db	  192,  194,  196,  198,   200,  202,  203,  205
+	.db	  207,  210,  212,  214,   216,  218,  220,  221
+	.db	  223,  225,  228,  230,   232,  234,  236,  237
+	.db	  239,  241,  243,  246,   248,  250,  252,  253
+
+	.db	  254,  253,  252,  250,   248,  246,  243,  241
+	.db	  239,  237,  236,  234,   232,  230,  228,  225
+	.db	  223,  221,  220,  218,   216,  214,  212,  210
+	.db	  207,  205,  203,  202,   200,  198,  196,  194
+
+	.db	  192,  189,  187,  185,   183,  182,  180,  178
+	.db	  176,  174,  171,  169,   167,  165,  164,  162
+	.db	  160,  158,  156,  153,   151,  149,  147,  146
+	.db	  144,  142,  140,  138,   135,  133,  131,  129
+
+
+TRI_LIMIT8:
+	; base freqency: 1046.50 Hz, discrets: 9, rms: 9.24, min: -0.98, max: 0.98
+
+	.db	  128,  126,  124,  122,   120,  118,  116,  114
+	.db	  113,  111,  109,  107,   105,  103,  100,   98
+	.db	   96,   94,   92,   90,    88,   86,   85,   83
+	.db	   81,   79,   77,   75,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    57,   55,   53,   51
+	.db	   49,   47,   44,   42,    40,   38,   36,   34
+	.db	   32,   30,   29,   27,    25,   23,   21,   19
+	.db	   16,   14,   12,    9,     7,    6,    4,    4
+
+	.db	    3,    4,    4,    6,     7,    9,   12,   14
+	.db	   16,   19,   21,   23,    25,   27,   29,   30
+	.db	   32,   34,   36,   38,    40,   42,   44,   47
+	.db	   49,   51,   53,   55,    57,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   75,   77,   79
+	.db	   81,   83,   85,   86,    88,   90,   92,   94
+	.db	   96,   98,  100,  103,   105,  107,  109,  111
+	.db	  113,  114,  116,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  140,  142
+	.db	  143,  145,  147,  149,   151,  153,  156,  158
+	.db	  160,  162,  164,  166,   168,  170,  171,  173
+	.db	  175,  177,  179,  181,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   199,  201,  203,  205
+	.db	  207,  209,  212,  214,   216,  218,  220,  222
+	.db	  224,  226,  227,  229,   231,  233,  235,  237
+	.db	  240,  242,  244,  247,   249,  250,  252,  252
+
+	.db	  253,  252,  252,  250,   249,  247,  244,  242
+	.db	  240,  237,  235,  233,   231,  229,  227,  226
+	.db	  224,  222,  220,  218,   216,  214,  212,  209
+	.db	  207,  205,  203,  201,   199,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  181,  179,  177
+	.db	  175,  173,  171,  170,   168,  166,  164,  162
+	.db	  160,  158,  156,  153,   151,  149,  147,  145
+	.db	  143,  142,  140,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT9:
+	; base freqency: 1661.21 Hz, discrets: 5, rms: 9.24, min: -0.96, max: 0.96
+
+	.db	  128,  126,  124,  122,   120,  118,  116,  114
+	.db	  112,  110,  108,  106,   104,  103,  101,   99
+	.db	   97,   95,   93,   91,    89,   87,   85,   83
+	.db	   81,   78,   76,   74,    72,   70,   68,   66
+
+	.db	   64,   62,   60,   58,    56,   54,   53,   51
+	.db	   49,   47,   45,   43,    41,   39,   37,   35
+	.db	   33,   31,   28,   26,    24,   21,   19,   17
+	.db	   15,   13,   11,    9,     8,    7,    6,    6
+
+	.db	    6,    6,    6,    7,     8,    9,   11,   13
+	.db	   15,   17,   19,   21,    24,   26,   28,   31
+	.db	   33,   35,   37,   39,    41,   43,   45,   47
+	.db	   49,   51,   53,   54,    56,   58,   60,   62
+
+	.db	   64,   66,   68,   70,    72,   74,   76,   78
+	.db	   81,   83,   85,   87,    89,   91,   93,   95
+	.db	   97,   99,  101,  103,   104,  106,  108,  110
+	.db	  112,  114,  116,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  140,  142
+	.db	  144,  146,  148,  150,   152,  153,  155,  157
+	.db	  159,  161,  163,  165,   167,  169,  171,  173
+	.db	  175,  178,  180,  182,   184,  186,  188,  190
+
+	.db	  192,  194,  196,  198,   200,  202,  203,  205
+	.db	  207,  209,  211,  213,   215,  217,  219,  221
+	.db	  223,  225,  228,  230,   232,  235,  237,  239
+	.db	  241,  243,  245,  247,   248,  249,  250,  250
+
+	.db	  250,  250,  250,  249,   248,  247,  245,  243
+	.db	  241,  239,  237,  235,   232,  230,  228,  225
+	.db	  223,  221,  219,  217,   215,  213,  211,  209
+	.db	  207,  205,  203,  202,   200,  198,  196,  194
+
+	.db	  192,  190,  188,  186,   184,  182,  180,  178
+	.db	  175,  173,  171,  169,   167,  165,  163,  161
+	.db	  159,  157,  155,  153,   152,  150,  148,  146
+	.db	  144,  142,  140,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT10:
+	; base freqency: 2637.01 Hz, discrets: 3, rms: 9.24, min: -0.93, max: 0.93
+
+	.db	  128,  126,  124,  122,   120,  118,  115,  113
+	.db	  111,  109,  107,  105,   103,  101,   99,   97
+	.db	   96,   94,   92,   90,    88,   87,   85,   83
+	.db	   81,   80,   78,   76,    74,   72,   70,   68
+
+	.db	   66,   64,   62,   60,    58,   55,   53,   51
+	.db	   48,   46,   44,   41,    39,   37,   34,   32
+	.db	   30,   28,   25,   23,    21,   20,   18,   16
+	.db	   15,   13,   12,   11,    10,   10,    9,    9
+
+	.db	    9,    9,    9,   10,    10,   11,   12,   13
+	.db	   15,   16,   18,   20,    21,   23,   25,   28
+	.db	   30,   32,   34,   37,    39,   41,   44,   46
+	.db	   48,   51,   53,   55,    58,   60,   62,   64
+
+	.db	   66,   68,   70,   72,    74,   76,   78,   80
+	.db	   81,   83,   85,   87,    88,   90,   92,   94
+	.db	   96,   97,   99,  101,   103,  105,  107,  109
+	.db	  111,  113,  115,  118,   120,  122,  124,  126
+
+	.db	  128,  130,  132,  134,   136,  138,  141,  143
+	.db	  145,  147,  149,  151,   153,  155,  157,  159
+	.db	  160,  162,  164,  166,   168,  169,  171,  173
+	.db	  175,  176,  178,  180,   182,  184,  186,  188
+
+	.db	  190,  192,  194,  196,   198,  201,  203,  205
+	.db	  208,  210,  212,  215,   217,  219,  222,  224
+	.db	  226,  228,  231,  233,   235,  236,  238,  240
+	.db	  241,  243,  244,  245,   246,  246,  247,  247
+
+	.db	  247,  247,  247,  246,   246,  245,  244,  243
+	.db	  241,  240,  238,  236,   235,  233,  231,  228
+	.db	  226,  224,  222,  219,   217,  215,  212,  210
+	.db	  208,  205,  203,  201,   198,  196,  194,  192
+
+	.db	  190,  188,  186,  184,   182,  180,  178,  176
+	.db	  175,  173,  171,  169,   168,  166,  164,  162
+	.db	  160,  159,  157,  155,   153,  151,  149,  147
+	.db	  145,  143,  141,  138,   136,  134,  132,  130
+
+
+TRI_LIMIT11:
+	; base freqency: 4185.98 Hz, discrets: 2, rms: 9.24, min: -0.90, max: 0.90
+
+	.db	  128,  127,  125,  123,   122,  120,  118,  116
+	.db	  115,  113,  111,  109,   107,  105,  103,  101
+	.db	   99,   97,   95,   93,    91,   89,   87,   84
+	.db	   82,   80,   77,   75,    73,   70,   68,   66
+
+	.db	   63,   61,   58,   56,    54,   51,   49,   47
+	.db	   44,   42,   40,   38,    36,   34,   32,   30
+	.db	   28,   26,   25,   23,    22,   20,   19,   18
+	.db	   17,   16,   15,   15,    14,   14,   13,   13
+
+	.db	   13,   13,   13,   14,    14,   15,   15,   16
+	.db	   17,   18,   19,   20,    22,   23,   25,   26
+	.db	   28,   30,   32,   34,    36,   38,   40,   42
+	.db	   44,   47,   49,   51,    54,   56,   58,   61
+
+	.db	   63,   66,   68,   70,    73,   75,   77,   80
+	.db	   82,   84,   87,   89,    91,   93,   95,   97
+	.db	   99,  101,  103,  105,   107,  109,  111,  113
+	.db	  115,  116,  118,  120,   122,  123,  125,  127
+
+	.db	  128,  129,  131,  133,   134,  136,  138,  140
+	.db	  141,  143,  145,  147,   149,  151,  153,  155
+	.db	  157,  159,  161,  163,   165,  167,  169,  172
+	.db	  174,  176,  179,  181,   183,  186,  188,  190
+
+	.db	  193,  195,  198,  200,   202,  205,  207,  209
+	.db	  212,  214,  216,  218,   220,  222,  224,  226
+	.db	  228,  230,  231,  233,   234,  236,  237,  238
+	.db	  239,  240,  241,  241,   242,  242,  243,  243
+
+	.db	  243,  243,  243,  242,   242,  241,  241,  240
+	.db	  239,  238,  237,  236,   234,  233,  231,  230
+	.db	  228,  226,  224,  222,   220,  218,  216,  214
+	.db	  212,  209,  207,  205,   202,  200,  198,  195
+
+	.db	  193,  190,  188,  186,   183,  181,  179,  176
+	.db	  174,  172,  169,  167,   165,  163,  161,  159
+	.db	  157,  155,  153,  151,   149,  147,  145,  143
+	.db	  141,  140,  138,  136,   134,  133,  131,  129
 
 ;-------------------------------------------------------------------------------------------------------------------
 
