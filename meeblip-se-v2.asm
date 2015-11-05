@@ -14,7 +14,7 @@
 ;-------------------------------------------------------------------------------------------------------------------
 ;
 ;					Changelog
-;
+;V2.05 2015.03.03 - Integrated AWE's filter Q_OFFSET code in filter, swapped filter code
 ;V2.04 2012.01.05 - Added maximum resonance table
 ;				  - Envelopes no longer restart on note off release if they're stopped
 ;				  - Replace MUL8X8S routine with hardware multiply
@@ -250,7 +250,7 @@ TPREV_KBD_H:	    .BYTE 1
 TPREV_L:	        .BYTE 1
 TPREV_H:	        .BYTE 1
 DELTAT_L:	        .BYTE 1		        ;\ Time from former course
-DELTAT_H:	        .BYTE 1		        ;/ of the main loop (1 bit = 32 µs)
+DELTAT_H:	        .BYTE 1		        ;/ of the main loop (1 bit = 32 ?s)
 ENVPHASE:	        .BYTE 1		        ; 0=stop 1=attack 2=decay 3=sustain 4=release
 ENV_FRAC_L:	        .BYTE 1
 ENV_FRAC_H:	        .BYTE 1
@@ -324,6 +324,7 @@ SCALED_RESONANCE: .byte 1
 b_L:		.byte 1
 b_H:		.byte 1
 VCF_STATUS: .byte 1				; 0 indicates VCF off, 1 = on
+.equ	Q_OFFSET		= 16
 
 ;-------------------------------------------------------------------------------------------------------------------
 ; MIDI Control Change parameter table
@@ -565,7 +566,7 @@ TIMETORATE:
 ; and then converted to approximate an exponential saturation curve.
 ;
 ; polynomial y = a	+ bx + cx2 + dx3
-; with coefficients…
+; with coefficients?
 ;    a  0
 ;    b  0.210841569
 ;    c  0.000177823
@@ -829,248 +830,196 @@ CALC_DIST:
 			adc		r31, r1				; sum scaled waves
 			movw	r16, r30			; place signed output in HDAC:LDAC
 
-			; rotate right a couple of times to make a couple of bits of headroom for resonance.  
+	; rotate right a couple of times to make a couple of bits of headroom for resonance.  
+	asr	r17			;\
+	ror	r16			;/ r17:r16 = r17:r16 asr 1
+	asr	r17			;\
+	ror	r16			;/ r17:r16 = r17:r16 asr 1
 
-            asr	    r17		            ;\
-		    ror	    r16		            ;/ r17:r16 = r17:r16 asr 1
-			asr	    r17		            ;\
-		    ror	    r16		            ;/ r17:r16 = r17:r16 asr 1
+;----------------------------------------------------------------------------
+; DCF:
+;----------------------------------------------------------------------------
 
-			movw	OSC_OUT_L, r16		; keep a copy for highpass filter
-
-;DCF:
-
-;-------------------------------------------------------------------------------------------------------------------
+;----------------------------------------------------------------------------
 ; Digitally Controlled Filter
 ;
 ; A 2-pole resonant low pass filter:
 ;
-; a += f * ((in - a) + q * (a - b));
-; b += f * (a - b); 
+; a += f * ((in - a) + q * 4 * (a - b))
+; b += f * (a - b)
+;
+; f = (1-F)/2+Q_offset
+; q = Q-f = Q-(1-F)/2+Q_offset
+;
+; F = LPF (cutoff)
+; Q = RESONANCE
+; q = SCALED_RESONANCE
+; b => output
 ;
 ; Input 16-Bit signed HDAC:LDAC (r17:r16), already scaled to minimize clipping (reduced to 25% of full code).
-;-------------------------------------------------------------------------------------------------------------------
+;
+;----------------------------------------------------------------------------
+; see also
+;   http://www.kvraudio.com/forum/printview.php?t=225711
+;----------------------------------------------------------------------------
 
-                            		;calc (in - a) ; both signed
-		sub     LDAC, a_L
-        sbc     HDAC, a_H
-                            		;check for overflow / do hard clipping
-        brvc OVERFLOW_1     		;if overflow bit is clear jump to OVERFLOW_1
+	; calc (in - a) ; both signed
+	sub	LDAC, a_L
+	sbc	HDAC, a_H
+					; check for overflow / do hard clipping
+	brvc	OVERFLOW_1		; if overflow bit is clear jump to OVERFLOW_1
+					; sub overflow happened -> set to min
+					; 0b1000.0000 0b0000.0001 -> min
+					; 0b0111.1111 0b1111.1111 -> max
+	ldi	LDAC, 0b00000001
+	ldi	HDAC, 0b10000000
+OVERFLOW_1:				; when overflow is clear
 
-        							;sub overflow happened -> set to min
-                            		;b1000.0000 b0000.0001 -> min
-                            		;0b0111.1111 0b1111.1111 -> max
-
-        ldi    	LDAC, 0b00000001 	
-        ldi 	HDAC, 0b10000000	
-
-OVERFLOW_1: 						;when overflow is clear
-
-        							;(in-a) is now in HDAC:LDAC as signed
-        							;now calc q*(a-b)
-
-        ; Scale resonance based on filter cutoff
-		lds		r22, SCALED_RESONANCE
-		lds    r20, LPF_I    		;load 'F' value
-        ldi    r21, 0xff
-
-        sub r21, r20 ; 1-F
-		lsr r21
-		ldi		r18, 0x08			; changed (4 was original value in V1)
-        add r21, r18
-
-        sub    r22, r21     		; Q-(1-f)
-        brcc OVERFLOW_2        		; if no overflow occured
-        ldi    r22, 0x00    		;0x00 because of unsigned
-        
-
+					; (in-a) is now in HDAC:LDAC as signed
+					; now calc q*(a-b)
+	lds	r22, SCALED_RESONANCE	; load filter Q value, unsigned
 OVERFLOW_2:
-        
-        mov    r20, a_L        	  	;\
-        mov    r21, a_H            	;/ load 'a' , signed
 
-        lds    z_H, b_H            	;\
-        lds    z_L, b_L            	;/ load 'b', signed
-
-        sub    r20, z_L            	;\
-        sbc    r21, z_H            	;/ (a-b) signed
-
-        brvc OVERFLOW_3            	;if overflow is clear jump to OVERFLOW_3
-        
-        							;b1000.0000 b0000.0001 -> min
-        							;0b0111.1111 0b1111.1111 -> max
-
-        ldi   r20, 0b00000001
-        ldi   r21, 0b10000000
-
+	mov	r20, a_L		; \
+	mov	r21, a_H		; / load 'a' , signed
+	lds	z_H, b_H		; \
+	lds	z_L, b_L		; / load 'b', signed
+	sub	r20, z_L		; \
+	sbc	r21, z_H		; / (a-b) signed
+	brvc	OVERFLOW_3		; if overflow is clear jump to OVERFLOW_3
+					; 0b1000.0000 0b0000.0001 -> min
+					; 0b0111.1111 0b1111.1111 -> max
+	ldi	r20, 0b00000001
+	ldi	r21, 0b10000000
 OVERFLOW_3:
-        
-		lds		r18, PATCH_SWITCH1	; Check Low Pass/High Pass panel switch. 
-		sbrs 	r18, SW_FILTER_MODE				
-		rjmp	CALC_LOWPASS
-								
+
+	lds	r18, PATCH_SWITCH1	; Check Low Pass/High Pass panel switch.
+	sbrs	r18, SW_FILTER_MODE
+	rjmp	CALC_LOWPASS
+
 SKIP_REZ:
-		movw    z_L, r20			; High Pass selected, so just load r21:r20 into z_H:z_L to disable Q 
-		rjmp	DCF_ADD				; Skip lowpass calc
+	movw	z_L, r20		; High Pass selected, so just load r21:r20 into z_H:z_L to disable Q
+	rjmp	DCF_ADD			; Skip lowpass calc
 
 CALC_LOWPASS:
-
-		; skip resonance calculation if VCF is turned off (value of 0)
-		lds		r18, VCF_STATUS
-		tst		r18
-		breq	SKIP_REZ
-									; mul signed:unsigned -> (a-b) * Q
-									; 16x8 into 16-bit
-									; r19:r18 = r21:r20 (ah:al)	* r22 (b)
-		
-		mulsu	r21, r22			; (signed)ah * b
-		movw	r18, r0
-		mul 	r20, r22			; al * b
-		add		r18, r1	
-		adc		r19, ZERO
-		rol 	r0					; r0.7 --> Cy
-		brcc	NO_ROUND			; LSByte < $80, so don't round up
-		inc 	r18			
+	; skip resonance calculation if VCF is turned off (value of 0)
+	lds	r18, VCF_STATUS
+	tst	r18			; test for ENV_STOP
+	breq	SKIP_REZ
+					; mul signed:unsigned -> (a-b) * q
+					; 16x8 into 16-bit
+					; r19:r18 = r21:r20 (ah:al) * r22 (b)
+	mulsu	r21, r22		; (signed)ah * b
+	movw	r18, r0
+	mul	r20, r22		; al * b
+	add	r18, r1
+	adc	r19, ZERO
+	rol	r0			; r0.7 --> Cy
+	brcc	NO_ROUND		; LSByte < $80, so don't round up
+	inc	r18
 NO_ROUND:
-        clc
-        lsl     r18
-        rol     r19
-
+	clc				; (a-b) * q * 4
+	lsl	r18
+	rol	r19
 OVERFLOW_3A:
-
-        clc
-        lsl     r18
-        rol     r19
-
+	clc
+	lsl	r18
+	rol	r19
 OVERFLOW_3B:
 
-		movw    z_L,r18        		;Q*(a-b) in z_H:z_L as signed
+	movw	z_L, r18		; q*(a-b) in z_H:z_L as signed
+					; add both
+					; both signed
+					; ((in-a)+q*(a-b))
+					; => HDAC:LDAC + z_H:z_L
+DCF_ADD:
+	add	LDAC, z_L
+	adc	HDAC, z_H
 
-        ;add both
-        ;both signed
-        ;((in-a)+q*(a-b))
-        ;=> HDAC:LDAC + z_H:z_L
- 
- DCF_ADD: 
-                
-        add     LDAC, z_L
-        adc     HDAC, z_H
-
-        brvc OVERFLOW_4            	;if overflow is clear
-        						   	;b1000.0000 b0000.0001 -> min 
-								   	;0b0111.1111 0b1111.1111 -> max
-
-        ldi    LDAC, 0b11111111
-        ldi    HDAC, 0b01111111
-
+	brvc	OVERFLOW_4		; if overflow is clear
+					; 0b1000.0000 0b0000.0001 -> min
+					; 0b0111.1111 0b1111.1111 -> max
+	ldi	LDAC, 0b11111111
+	ldi	HDAC, 0b01111111
 OVERFLOW_4:
-
-        							;Result is a signed value in HDAC:LDAC
-        							;calc * f 
-        							;((in-a)+q*(a-b))*f
-
-        lds    r20, LPF_I         	;load lowpass 'F' value
-		lds	   r18, PATCH_SWITCH1		 
-		sbrc   r18, SW_FILTER_MODE	; Check LP/HP switch.
-		lds    r20, HPF_I			; Switch set, so load 'F' for HP
-
-									; mul signed unsigned HDAC*F
-									; 16x8 into 16-bit
-									; r19:r18 = HDAC:LDAC (ah:al) * r20 (b)
-
-		mulsu	HDAC, r20			; (signed)ah * b
-		movw	r18, r0
-		mul 	LDAC, r20			; al * b
-		add		r18, r1				; signed result in r19:r18
-		adc		r19, ZERO
-		rol 	r0					; r0.7 --> Cy
-		brcc	NO_ROUND2			; LSByte < $80, so don't round up
-		inc 	r18			
+					; Result is a signed value in HDAC:LDAC
+					; calc * f
+					; ((in-a)+q*(a-b))*f
+	lds	r20, LPF_I		; load lowpass 'F' value
+	lds	r18, PATCH_SWITCH1
+	sbrc	r18, SW_FILTER_MODE	; Check LP/HP switch.
+	lds	r20, HPF_I		; Switch set, so load 'F' for HP
+					; mul signed unsigned HDAC*F
+					; 16x8 into 16-bit
+					; r19:r18 = HDAC:LDAC (ah:al) * r20 (b)
+	mulsu	HDAC, r20		; (signed)ah * b
+	movw	r18, r0
+	mul	LDAC, r20		; al * b
+	add	r18, r1			; signed result in r19:r18
+	adc	r19, ZERO
+	rol	r0			; r0.7 --> Cy
+	brcc	NO_ROUND2		; LSByte < $80, so don't round up
+	inc	r18
 NO_ROUND2:
-        							;Add result to 'a'
-        							;a+=f*((in-a)+q*(a-b))
-
-        add        a_L, r18
-        adc        a_H, r19
-        brvc OVERFLOW_5           	;if overflow is clear
-                                	;b1000.0000 b0000.0001 -> min 
-                                	;0b0111.1111 0b1111.1111 -> max
-
-		ldi	z_L, 0b11111111
-		ldi	z_H, 0b01111111
-		mov	a_L, z_L
-		mov	a_H, z_H
-
+					; Add result to 'a'
+					; a+=f*((in-a)+q*(a-b))
+	add	a_L, r18
+	adc	a_H, r19
+	brvc	OVERFLOW_5		; if overflow is clear
+					; 0b1000.0000 0b0000.0001 -> min
+					; 0b0111.1111 0b1111.1111 -> max
+	ldi	z_L, 0b11111111
+	ldi	z_H, 0b01111111
+	mov	a_L, z_L
+	mov	a_H, z_H
 OVERFLOW_5:
+					; calculated a+=f*((in-a)+q*(a-b)) as signed value and saved in a_H:a_L
+					; calc 'b'
+					; b += f * (a*0.5 - b)
+	mov	z_H, a_H		; \
+	mov	z_L, a_L		; / load 'a' as signed
 
-        							;calculated a+=f*((in-a)+q*(a-b)) as signed value and saved in a_H:a_L
-        							;calc 'b' 
-        							;b += f * (a*0.5 - b);  
+	lds	temp, b_L		; \
+	lds	temp2, b_H		; / load b as signed
 
-		mov	z_H, a_H				;\
-        mov z_L, a_L         		;/ load 'a' as signed
+	sub	z_L, temp		; \
+	sbc	z_H, temp2		; / (a - b) signed
 
-        lds temp, b_L        		;\
-        lds temp2, b_H        		;/ load b as signed
-
-        sub z_L, temp        		;\    			
-        sbc z_H, temp2				;/ (a - b) signed
-
-        brvc OVERFLOW_6    			;if overflow is clear
-                         			;b1000.0000 b0000.0001 -> min 
-						 			;0b0111.1111 0b1111.1111 -> max
-
-        ldi z_L, 0b00000001
-        ldi z_H, 0b10000000
-
+	brvc	OVERFLOW_6		; if overflow is clear
+					; 0b1000.0000 0b0000.0001 -> min
+					; 0b0111.1111 0b1111.1111 -> max
+	ldi	z_L, 0b00000001
+	ldi	z_H, 0b10000000
 OVERFLOW_6:
 
-        lds    r20, LPF_I         	;load lowpass 'F' value
-		lds	   r18, PATCH_SWITCH1		 
-		sbrc   r18, SW_FILTER_MODE	; Check LP/HP switch.
-		lds    r20, HPF_I			; Switch set to HP, so load 'F' for HP
+	lds	r20, LPF_I		; load lowpass 'F' value
+	lds	r18, PATCH_SWITCH1
+	sbrc	r18, SW_FILTER_MODE	; Check LP/HP switch.
+	lds	r20, HPF_I		; Switch set to HP, so load 'F' for HP
+					; mul signed unsigned (a-b) * F
+					; 16x8 into 16-bit
+					; r19:r18 = z_H:z_L (ah:al) * r20 (b)
+	mulsu	z_H, r20		; (signed)ah * b
+	movw	r18, r0
+	mul	z_L, r20		; al * b
+	add	r18, r1			; signed result in r19:r18
+	adc	r19, ZERO
 
-		;mulsu  z_H, r20 			;mul signed unsigned (a-b) * F
+	add	temp,  r18		; \ add result to 'b' , signed
+	adc	temp2, r19		; / b +=(a-b)*f
 
-								    ; mul signed unsigned (a-b) * F
-								    ; 16x8 into 16-bit
-								    ; r19:r18 = z_H:z_L (ah:al) * r20 (b)
-		mulsu	z_H, r20		    ; (signed)ah * b
-		movw	r18, r0
-		mul 	z_L, r20		    ; al * b
-		add		r18, r1			    ; signed result in r19:r18
-		adc		r19, ZERO
-                                 	
-        
-        add temp,  r18          	;\ add result to 'b' , signed
-        adc temp2, r19         		;/ b +=(a-b)*f
-
-        brvc OVERFLOW_7          	;if overflow is clear
-                
-							   		;b1000.0000 b0000.0001 -> min                      
-							   		;0b0111.1111 0b1111.1111 -> max
-
-        ldi temp,  0b11111111
-        ldi temp2, 0b01111111
-
+	brvc	OVERFLOW_7		; if overflow is clear
+					; 0b1000.0000 0b0000.0001 -> min
+					; 0b0111.1111 0b1111.1111 -> max
+	ldi	temp,  0b11111111
+	ldi	temp2, 0b01111111
 OVERFLOW_7:
 
-		sts b_L, temp         		;\
-        sts b_H, temp2        		;/ save value of 'b' 
+	sts	b_L, temp		; \
+	sts	b_H, temp2		; / save value of 'b'
+	mov	LDAC, temp		; B now contains the filtered signal in HDAC:LDAC
+	mov	HDAC, temp2		; output sample HDAC:LDAC = r17:r16
 
-									
-        mov LDAC, temp				;B now contains the filtered signal in HDAC:LDAC
-        mov HDAC, temp2
-
-
-		; If in HP filter mode, just use (filter input - filter output)
-			
-		lds		r18, PATCH_SWITCH1	; Check if LP or HP filter
-		sbrs 	r18, SW_FILTER_MODE				
-		rjmp	DCA					; LP, so jump to DCA
-		sub		OSC_OUT_L, LDAC		; HP filter, so output = filter input - output
-		sbc		OSC_OUT_H, HDAC
-		movw	LDAC, OSC_OUT_L
 
 									
 ;-------------------------------------------------------------------------------------------------------------------
@@ -2250,7 +2199,7 @@ RESET:
 
 ;initialize Timer1:
 		    ldi	    r16, 0x04    		;\ prescaler = CK/256
-		    out	    TCCr1B, r16		    ;/ (clock = 32µs)
+		    out	    TCCr1B, r16		    ;/ (clock = 32?s)
 
 ;initialize Timer2:
             ldi     r16, 54             ;\  
@@ -3009,7 +2958,7 @@ MIDI_VELOCITY:
 		    lds	    r16, TPREV_L	    ;\
 		    lds	    r17, TPREV_H	    ;/ r17:r16 = t0
 		    sub	    r22, r16		    ;\ r23:r22 = t - t0 = dt
-		    sbc	    r23, r17		    ;/ (1 bit = 32 µs)
+		    sbc	    r23, r17		    ;/ (1 bit = 32 ?s)
 		    sts	    TPREV_L, r18	    ;\
 		    sts	    TPREV_H, r19	    ;/ t0 = t
     		sts	    DELTAT_L, r22		;\
@@ -3751,48 +3700,66 @@ MLP_DCF0:
 		    adc	    r31, r18
 
 MLP_DCF3:
-;CUTOFF:
-		    lds	    r16, CUTOFF
-		    clr	    r17
-		    add	    r16, r30
-    		adc	    r17, r31
-		    tst	    r17
-		    brpl	MLP_DCF1
-		    ldi	    r16, 0
-		    rjmp	MLP_DCF2
+; CUTOFF:
+	lds	r16, CUTOFF
+	clr	r17
+	add	r16, r30
+	adc	r17, r31
+	tst	r17			; limit result to 0..+255
+	brpl	MLP_DCF1
+	ldi	r16, 0
+	rjmp	MLP_DCF2
 
 MLP_DCF1:
-            breq	MLP_DCF2
-		    ldi	    r16, 255
+	breq	MLP_DCF2
+	ldi	r16, 255
 
 MLP_DCF2:
-			lsr	    r16			        ; 0..127
-			ldi		r30, low( TAB_VCF)	;\
-			ldi		r31, high( TAB_VCF)	;/ Z = &Tab
-			rcall	TAB_BYTE		; r16 = 1.. 255
-			sts		LPF_I, r16		; Store Lowpass F value
-			subi	r16, 10			; Offset HP knob value
-			brcc	STORE_HPF
-			ldi		r16, 0x00		; Limit HP to min of 0
+	lsr	r16			; 0..127
+	ldi	r30, low( TAB_VCF)	; \
+	ldi	r31, high( TAB_VCF)	; /  Z = &Tab
+	rcall	TAB_BYTE		; r16 = 1.. 255
+	sts	LPF_I, r16		; Store Lowpass F value
+	subi	r16, 10			; Offset HP knob value
+	brcc	STORE_HPF
+	ldi	r16, 0x00		; Limit HP to min of 0
 STORE_HPF:
-			sts		HPF_I, r16
+	sts	HPF_I, r16
 
 ; Limit resonance at low filter cutoff settings
-			lds		r17, RESONANCE
-			lds		r16, LPF_I
-			cpi		r16, 16
-			brlo	LIMIT_REZ		; Only limit resonance if LPF_I is 0..15
-			mov		r16, r17	
-			rjmp	EXIT_LIMIT_REZ
+	lds	r17, RESONANCE
+	lds	r16, LPF_I
+	cpi	r16, 16
+	brlo	LIMIT_REZ		; Only limit resonance if LPF_I is 0..15
+	mov	r16, r17
+	rjmp	EXIT_LIMIT_REZ
 LIMIT_REZ:
-			ldi		r30, low( TAB_REZ)	;\
-			ldi		r31, high( TAB_REZ)	;/ Z = &Tab
-			rcall	TAB_BYTE		; r16 = 0..15	; r16 holds maximum allow resonance
-			cp		r16, r17
-			brlo	EXIT_LIMIT_REZ
-			mov		r16, r17
+	ldi	r30, low( TAB_REZ)	; \
+	ldi	r31, high( TAB_REZ)	; /  Z = &Tab
+	rcall	TAB_BYTE		; r16 = 0..15	; r16 holds maximum allow resonance
+	cp	r16, r17
+	brlo	EXIT_LIMIT_REZ
+	mov	r16, r17
 EXIT_LIMIT_REZ:
-			sts		SCALED_RESONANCE, r16		; Store scaled resonance
+
+;----------------------------------------------------------------------------
+; Scale Filter Q value to compensate for resonance loss
+; Doing this here to get it out of the sample loop
+;----------------------------------------------------------------------------
+
+	lds	r18, LPF_I		; load 'F' value
+	ldi	r17, 0xff
+
+	sub	r17, r18		; 1-F
+	lsr	r17
+	ldi	r19, Q_OFFSET
+	add	r17, r19		; f = (1-F)/2+Q_offset
+
+	sub	r16, r17		; Q-f
+	brcc	REZ_OVERFLOW_CHECK	; if no overflow occured
+	ldi	r16, 0x00		; 0x00 because of unsigned
+REZ_OVERFLOW_CHECK:
+	sts	SCALED_RESONANCE, r16	; Store scaled resonance
 
             ;---------------
             ;sound level:
